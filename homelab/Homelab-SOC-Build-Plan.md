@@ -178,13 +178,21 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
                 │ (Sysmon+SwiftOnSecurity /│ telemetry
                 │  Auditd)             │
  ┌──────────────▼──────────────────────▼──────────────────────────────────────┐
- │  VLAN 1 (Main LAN)        VLAN 99 (Mgmt)        VLAN 20 (IoT)             │
- │  Desktop 10.10.10.x       Pi 10.99.99.3          iPhone/iPad               │
- │  Laptop  10.10.10.x       (Splunk UF + Auditd)   (OpenVAS scan target      │
- │  (Sysmon+SwiftOnSecurity,                         only, no agent)         │
- │   OpenEDR agent, Splunk UF)                                                │
+ │  VLAN 1 (Main LAN)                       VLAN 99 (Mgmt)   VLAN 20 (IoT)   │
+ │  Desktop 10.10.10.x — OS unconfirmed,    Pi 10.99.99.3     iPhone/iPad    │
+ │    telemetry plan pending (see Phase 2)  (Splunk UF        (OpenVAS      │
+ │  Laptop  10.10.10.x — Fedora Linux        + Auditd)         scan target  │
+ │    (Auditd + Splunk UF; no OpenEDR —                          only,     │
+ │     agent is Windows-only, not applicable)                    no agent) │
  └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Endpoint OS correction (see Troubleshooting Log — Current-Stack Issue 2):** The
+> laptop was originally assumed Windows and routed toward Sysmon. It's actually
+> running Fedora Linux — confirmed via Splunk's `hostname` field reporting `fedora`.
+> It now belongs on the Auditd path, and OpenEDR's Windows-only agent doesn't apply
+> to it. Desktop's OS was never independently confirmed either — don't assume
+> Windows there without checking first.
 
 > **Firewall note on traffic direction**
 > Splunk UF and OpenEDR agents always INITIATE toward their backend — the backend
@@ -235,22 +243,22 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
       - **Open item:** the new stack's target spec for this VM is 4 vCPU / 8 GB / 100 GB. The disk bump (50 GB → 100 GB) is the one change worth actually doing given Splunk's own index storage needs — plan a disk resize during the repurposing pass.
       - Fully uninstall Wazuh first (see Troubleshooting Log — Wazuh section, now deprecated/historical) before installing Splunk to avoid port/service conflicts.
 
-- [ ] **Create OpenVAS VM on Minimox** (`scanner.home.arpa`)
+- [x] **Create OpenVAS VM on Minimox** (`scanner.home.arpa`)
       - OS: Ubuntu 22.04 LTS
       - Resources: 4 vCPU, 8 GB RAM, 100 GB disk (Greenbone's own minimum is 4 GB RAM / 20 GB disk for scanner + feed data — sized up for headroom)
       - Network bridge: `vmbr0` (VLAN 40)
 
-- [ ] **Create Ansible + Semaphore VM on Bigmox** (`ansible.home.arpa`)
+- [x] **Create Ansible + Semaphore VM on Bigmox** (`ansible.home.arpa`)
       - OS: Ubuntu 24.04 LTS
       - Resources: 2 vCPU, 2 GB RAM, 20 GB disk (Semaphore's own guidance: 2 GB RAM / 2 CPU cores minimum)
       - Network bridge: `vmbr0` (VLAN 40)
 
-- [ ] **Verify all VMs get the right IPs** — after first boot/repurpose:
-      ```bash
-      ip a show ens18    # or eth0/ens3 depending on Proxmox NIC naming
-      ```
+- [x] **Verify all VMs get the right IPs** — after first boot/repurpose:
+```bash
+ip a show ens18    # or eth0/ens3 depending on Proxmox NIC naming
+```
 
-- [ ] **Confirm hostnames resolve from the desktop before moving to Phase 1**
+- [x] **Confirm hostnames resolve from the desktop before moving to Phase 1**
       ```
       nslookup splunk.home.arpa
       nslookup openedr.home.arpa
@@ -294,22 +302,21 @@ Free (converted) | 500 MB/day  | NO ✗     | NO ✗       | Perpetual after tri
 
 **Installation**
 
-- [ ] Download Splunk Enterprise from https://www.splunk.com/en_us/download/splunk-enterprise.html
-      ```bash
-      wget -O splunk.deb 'https://download.splunk.com/products/splunk/releases/\
-      9.x.x/linux/splunk-9.x.x-linux-amd64.deb'
-      sudo dpkg -i splunk.deb
-      sudo /opt/splunk/bin/splunk start --accept-license
-      sudo /opt/splunk/bin/splunk enable boot-start
-      ```
-      Replace the version in the URL with whatever's current on the download page.
+- [x] Download Splunk Enterprise from https://www.splunk.com/en_us/download/splunk-enterprise.html
+```bash
+wget -O splunk.deb 'https://download.splunk.com/products/splunk/releases/\
+9.x.x/linux/splunk-9.x.x-linux-amd64.deb'
+sudo dpkg -i splunk.deb
+sudo /opt/splunk/bin/splunk start --accept-license
+sudo /opt/splunk/bin/splunk enable boot-start
+```
 
-- [ ] Access the Splunk web UI at `http://splunk.home.arpa:8000` and set admin
+- [x] Access the Splunk web UI at `http://splunk.home.arpa:8000` and set admin
       credentials on first login.
 
 **Configure Receiving + Indexes**
 
-- [ ] Splunk Web → Settings → Forwarding and Receiving → Receive Data → Add New
+- [x] Splunk Web → Settings → Forwarding and Receiving → Receive Data → Add New
       → port `9997` → Save
 - [ ] Create indexes (Settings → Indexes → New Index):
       - `windows-events` (Sysmon + Windows Security/System/Application logs)
@@ -321,18 +328,16 @@ Free (converted) | 500 MB/day  | NO ✗     | NO ✗       | Perpetual after tri
 
 **Universal Forwarder on Every Endpoint**
 
-- [ ] Install the Splunk Universal Forwarder (UF) on Desktop, Laptop, Pi, and
-      both Proxmox hosts (Bigmox, Minimox). Download:
-      https://www.splunk.com/en_us/download/universal-forwarder.html
+- [x] Install the Splunk Universal Forwarder (UF) on Desktop, Laptop, Pi, and both Proxmox hosts (Bigmox, Minimox). Download: https://www.splunk.com/en_us/download/universal-forwarder.html
       Point each install at `splunk.home.arpa:9997` as the receiving indexer.
       Actual per-source input configuration (Sysmon channel, Auditd file monitor)
       is covered in Phase 2.
 
 - [ ] Verify data is flowing once Phase 2 inputs are configured:
-      ```spl
-      index="windows-events"
-      index="linux-audit"
-      ```
+```spl
+index="windows-events"
+index="linux-audit"
+```
 
 ### SPL Basics to Learn During This Phase
 
@@ -384,18 +389,24 @@ Port  | Protocol | Direction                | Purpose
 Sysmon with the SwiftOnSecurity config on Windows machines, Auditd watch rules on
 Linux machines — instead of relying on default OS logging alone.
 **Estimated time:** 2–3 hours
-**Endpoints:** Desktop, Laptop (Windows) · Pi, Bigmox host, Minimox host (Linux)
+**Endpoints:** Desktop (OS unconfirmed — verify before assuming Windows, see note
+below) · Pi, Bigmox host, Minimox host, Laptop (Fedora Linux) — Linux/Auditd path
+
+> **Endpoint OS status:** The laptop is confirmed **Fedora Linux** (see
+> Troubleshooting Log — Current-Stack Issue 2), so it's listed under Auditd below,
+> not Sysmon. Desktop's OS was never actually verified — it was defaulted to
+> Windows without checking, which is exactly the mistake that got made with the
+> laptop. Confirm Desktop's real OS before running either section below against it.
 
 ### Windows — Sysmon + SwiftOnSecurity
 
-- [ ] On the Splunk server, install the **Splunk Add-on for Microsoft Sysmon**
+- [x] On the Splunk server, install the **Splunk Add-on for Microsoft Sysmon**
       (Splunkbase) — provides CIM-compliant field extractions for Sysmon events.
 
-- [ ] On each Windows endpoint (Desktop, Laptop):
+- [x] On each confirmed-Windows endpoint (Desktop, pending OS confirmation — do not run this section against the laptop, it's Fedora):
       - Download Sysmon from Microsoft Sysinternals:
         https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon
-      - Download the SwiftOnSecurity config (widely used baseline, pre-tuned to
-        cut noise from normal Windows process activity):
+      - Download the SwiftOnSecurity config (widely used baseline, pre-tuned to cut noise from normal Windows process activity):
         https://github.com/SwiftOnSecurity/sysmon-config
       - Install with the config applied:
         ```powershell
@@ -405,34 +416,35 @@ Linux machines — instead of relying on default OS logging alone.
 
 - [ ] Configure the Splunk UF's `inputs.conf` to collect the Sysmon operational
       log:
-      ```ini
-      [WinEventLog://Microsoft-Windows-Sysmon/Operational]
-      index = windows-events
-      disabled = false
-      renderXml = false
+```ini
+[WinEventLog://Microsoft-Windows-Sysmon/Operational]
+index = windows-events
+disabled = false
+renderXml = false
 
-      [WinEventLog://Security]
-      index = windows-events
-      disabled = false
+[WinEventLog://Security]
+index = windows-events
+disabled = false
 
-      [WinEventLog://System]
-      index = windows-events
-      disabled = false
-      ```
-      Restart the UF service after editing.
+[WinEventLog://System]
+index = windows-events
+disabled = false
+Restart the UF service after editing.
+```
+      
 
 - [ ] Verify in Splunk:
-      ```spl
-      index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
-      ```
+```spl
+index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+```
 
-### Linux — Auditd (Pi, Bigmox host, Minimox host)
+### Linux — Auditd (Pi, Bigmox host, Minimox host, Laptop — Fedora)
 
 - [ ] Install and enable auditd:
-      ```bash
-      sudo apt install -y auditd audispd-plugins
-      sudo systemctl enable --now auditd
-      ```
+```bash
+sudo apt install -y auditd audispd-plugins
+sudo systemctl enable --now auditd
+```
 
 - [ ] Set `log_format=ENRICHED` in `/etc/audit/auditd.conf` (best practice for
       Splunk CIM field mapping), and change `log_group` from `root` to a group the
@@ -441,27 +453,27 @@ Linux machines — instead of relying on default OS logging alone.
 
 - [ ] Add watch rules for security-relevant paths/syscalls (adjust to taste —
       start narrow, expand as you learn what's noisy):
-      ```bash
-      sudo auditctl -w /etc/passwd -p wa -k passwd_changes
-      sudo auditctl -w /etc/shadow -p wa -k shadow_changes
-      sudo auditctl -w /etc/sudoers -p wa -k sudoers_changes
-      sudo auditctl -a always,exit -F arch=b64 -S execve -k exec_commands
-      ```
+```bash
+sudo auditctl -w /etc/passwd -p wa -k passwd_changes
+sudo auditctl -w /etc/shadow -p wa -k shadow_changes
+sudo auditctl -w /etc/sudoers -p wa -k sudoers_changes
+sudo auditctl -a always,exit -F arch=b64 -S execve -k exec_commands
+```
       Persist these in `/etc/audit/rules.d/` so they survive a reboot.
 
 - [ ] Configure the Splunk UF's `inputs.conf`:
-      ```ini
-      [monitor:///var/log/audit/audit.log]
-      index = linux-audit
-      sourcetype = linux:audit
-      disabled = false
-      ```
+```ini
+[monitor:///var/log/audit/audit.log]
+index = linux-audit
+sourcetype = linux:audit
+disabled = false
+```
       Restart the UF after editing.
 
 - [ ] Verify in Splunk:
-      ```spl
-      index="linux-audit"
-      ```
+```spl
+index="linux-audit"
+```
 
 ### Sources
 - Splunk Add-on for Microsoft Sysmon: https://splunkbase.splunk.com/app/1914
@@ -514,10 +526,10 @@ Two separate projects exist — know which one you're using:
       Docker CE install for Ubuntu).
 
 - [ ] Run the OpenEDR install script:
-      ```bash
-      curl -L https://github.com/jymcheong/OpenEDR/tarball/master | tar xz \
-        && mv jym* openEDR && cd openEDR && ./install.sh
-      ```
+```bash
+curl -L https://github.com/jymcheong/OpenEDR/tarball/master | tar xz \
+&& mv jym* openEDR && cd openEDR && ./install.sh
+```
       Prompts for SFTP IP and Frontend IP — use `10.40.40.13` for both.
 
 - [ ] Verify containers: `docker ps` (OrientDB, SFTP receiver, web frontend)
@@ -525,7 +537,12 @@ Two separate projects exist — know which one you're using:
 - [ ] Access the web frontend at `http://openedr.home.arpa:8080`,
       OrientDB console at `http://openedr.home.arpa:2480`
 
-**Windows Agent Setup (Desktop, Laptop)**
+**Windows Agent Setup (Desktop only — pending OS confirmation)**
+
+> The laptop is confirmed Fedora Linux (Troubleshooting Log — Current-Stack Issue 2),
+> so it's out of scope for this section entirely — the jymcheong/OpenEDR and
+> ComodoSecurity agents covered in this doc are Windows-only. Desktop's OS still
+> needs confirming before running this section against it either.
 
 - [ ] Download the OpenEDR Windows agent MSI (ComodoSecurity GitHub releases),
       install with the backend IP:
@@ -546,32 +563,26 @@ Two separate projects exist — know which one you're using:
 
 ## Phase 4 — OpenVAS / Greenbone (Vulnerability Scanning)
 
-**Goal:** Greenbone Community Edition (OpenVAS) running on its own VM, feed data
-loaded, and a first authenticated/unauthenticated scan run against the homelab's
-own IP ranges — including devices with no agent (switch, IoT, consoles).
+**Goal:** Greenbone Community Edition (OpenVAS) running on its own VM, feed data loaded, and a first authenticated/unauthenticated scan run against the homelab's own IP ranges — including devices with no agent (switch, IoT, consoles).
 **Estimated time:** 3–5 hours (feed sync on first run can take a while)
 **VM:** `scanner.home.arpa` (10.40.40.14, on Minimox)
 
 ### Why This Tool
 
-Vulnerability management is a distinct, JD-common skill from both SIEM and EDR
-work, and it's the one tool in this stack that needs no endpoint agent — it covers
-every IP on the network, including the Netgear switch, IoT devices, and game
-consoles that can't run a Splunk UF or OpenEDR agent. This also sets up the
-scan → attack → detect → remediate → re-scan loop planned for VLAN 50 (Cyber Lab)
-once that's built.
+Vulnerability management is a distinct, JD-common skill from both SIEM and EDR work, and it's the one tool in this stack that needs no endpoint agent — it covers every IP on the network, including the Netgear switch, IoT devices, and game consoles that can't run a Splunk UF or OpenEDR agent. This also sets up the scan → attack → detect → remediate → re-scan loop planned for VLAN 50 (Cyber Lab) once that's built.
 
 ### Checklist
 
 - [ ] Install Docker + Docker Compose on the OpenVAS VM.
 
 - [ ] Pull Greenbone's official Community Containers compose file:
-      ```bash
-      mkdir openvas && cd openvas
-      curl -f -L https://greenbone.github.io/docs/latest/_static/docker-compose-22.4.yml \
-        -o docker-compose.yml
-      docker compose up -d
-      ```
+```bash
+mkdir openvas && cd openvas
+curl -f -L https://greenbone.github.io/docs/latest/_static/docker
+compose-22.4.yml \
+-o docker-compose.yml
+docker compose up -d
+```
 
 - [ ] Wait for the vulnerability feed to fully sync on first start (this can take
       a while — check container logs for feed-sync completion before scanning).
@@ -613,17 +624,14 @@ into once that's built.
 
 ### Why This Tool
 
-Config management/automation is its own job track (Security Automation Engineer,
-DevSecOps), and Ansible + a UI on top of it (Semaphore) is directly relevant there.
-It's also the actual "do something" half of detect → respond — Splunk can tell you
-something's wrong, but Ansible is what actually executes a fix.
+Config management/automation is its own job track (Security Automation Engineer, DevSecOps), and Ansible + a UI on top of it (Semaphore) is directly relevant there. It's also the actual "do something" half of detect → respond — Splunk can tell you something's wrong, but Ansible is what actually executes a fix.
 
 ### Checklist
 
 - [ ] Install Ansible on the VM:
-      ```bash
-      sudo apt update && sudo apt install -y ansible
-      ```
+```bash
+sudo apt update && sudo apt install -y ansible
+```
 
 - [ ] Install Semaphore (native package is the simplest path):
       ```bash
@@ -666,9 +674,7 @@ the actual cybersecurity practice payoff.
 
 ### Why a Test VM, Not Your Daily Driver
 
-Spin up a small Ubuntu or Kali VM on Bigmox or Minimox, enroll it with Splunk UF +
-OpenEDR agent (Linux agent if available, otherwise Windows-only coverage for
-OpenEDR), and use it as the victim machine.
+Spin up a small Ubuntu or Kali VM on Bigmox or Minimox, enroll it with Splunk UF + OpenEDR agent (Linux agent if available, otherwise Windows-only coverage for OpenEDR), and use it as the victim machine.
 
 ### Tests to Run
 
@@ -677,41 +683,40 @@ OpenEDR), and use it as the victim machine.
 echo 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' \
   > /tmp/eicar.txt
 ```
-Expected: Auditd watch rule (if `/tmp` is monitored) or Sysmon file-create event
-surfaces in Splunk.
+Expected: Auditd watch rule (if `/tmp` is monitored) or Sysmon file-create event surfaces in Splunk.
 
 **Test 2 — Failed SSH Brute-Force**
 ```bash
 for i in {1..10}; do ssh wronguser@10.40.40.x 2>/dev/null; done
 ```
-Expected: Auditd logs the failed attempts; build a Splunk detection search for
-repeated failures from the same source in a short window (this is now something
-*you* build in SPL rather than something a prebuilt Wazuh rule hands you — that's
-the point).
+Expected: Auditd logs the failed attempts; build a Splunk detection search for repeated failures from the same source in a short window (this is now something *you* build in SPL rather than something a prebuilt Wazuh rule hands you — that's the point).
 
 **Test 3 — Nmap Port Scan**
 ```bash
 nmap -sV 10.40.40.x
 ```
-Expected: Visible in an OpenVAS scan of the target if run around the same time;
-also a good candidate for a Splunk detection built on Auditd/network telemetry.
+Expected: Visible in an OpenVAS scan of the target if run around the same time; also a good candidate for a Splunk detection built on Auditd/network telemetry.
 
-**Test 4 — Suspicious Process Execution (Windows)**
+**Test 4 — Suspicious Process Execution (Windows, Desktop only — pending OS confirmation)**
 ```powershell
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("whoami"))
 powershell -encodedCommand $encoded
 ```
-Expected: Sysmon Event ID 1 (process creation) with the encoded command line
-visible in Splunk; OpenEDR process tree shows the same invocation.
+Expected: Sysmon Event ID 1 (process creation) with the encoded command line visible in Splunk; OpenEDR process tree shows the same invocation. Only valid once Desktop's OS is actually confirmed Windows.
+
+**Test 4b — Suspicious Process Execution (Laptop, Fedora/Auditd equivalent)**
+```bash
+echo d2hvYW1p | base64 -d | bash
+```
+Expected: The `exec_commands` auditd rule from Phase 2 fires (execve syscall watch), visible in Splunk under `index="linux-audit"`. This is the laptop's equivalent of Test 4 — no Sysmon/OpenEDR coverage exists for it, so Auditd is the only detection path.
 
 ### Validation Checklist
 
 - [ ] Test 1 (EICAR): file-create event visible in Splunk
-- [ ] Test 2 (Brute-force): failed logons visible in Splunk `linux-audit`; custom
-      SPL detection built and saved
+- [ ] Test 2 (Brute-force): failed logons visible in Splunk `linux-audit`; custom SPL detection built and saved
 - [ ] Test 3 (Nmap): scan visible in OpenVAS results; detection attempted in Splunk
-- [ ] Test 4 (PowerShell): Sysmon event visible in Splunk; process tree visible
-      in OpenEDR
+- [ ] Test 4 (PowerShell, Desktop): Sysmon event visible in Splunk; process tree visible in OpenEDR — pending Desktop OS confirmation
+- [ ] Test 4b (Laptop/Auditd): exec_commands event visible in Splunk `linux-audit`
 - [ ] Document what each tool caught vs. missed in the Troubleshooting Log below
 
 ### Sources
@@ -728,11 +733,9 @@ visible in Splunk; OpenEDR process tree shows the same invocation.
 
 ### Checklist
 
-- [ ] **Re-verify all connection-state fixes are still in place**
-      "Block Servers to Management" = New, "Block Servers to Main" = New
+- [ ] **Re-verify all connection-state fixes are still in place** - "Block Servers to Management" = New, "Block Servers to Main" = New
 
-- [ ] **Check Bigmox and Minimox resource usage** — re-pull a fresh snapshot in
-      Proxmox now that the stack has changed (Splunk repurposed VM, new OpenVAS
+- [ ] **Check Bigmox and Minimox resource usage** — re-pull a fresh snapshot in Proxmox now that the stack has changed (Splunk repurposed VM, new OpenVAS
       and Ansible VMs). The last documented snapshot (`Homelab-Server-VM-Specs.md`,
       July 5, 2026) was taken while the VM was still running Wazuh — it's stale
       for sizing decisions now.
@@ -745,46 +748,35 @@ visible in Splunk; OpenEDR process tree shows the same invocation.
       nslookup ansible.home.arpa  → 10.40.40.15
       ```
 
-- [ ] **Plan VLAN 50 (Cyber Lab) zone assignment** — per the network doc roadmap,
-      create a dedicated zone (not Internal) with narrow allow rules only for
-      monitoring/scanning traffic back to `splunk.home.arpa` and `scanner.home.arpa`.
+- [ ] **Plan VLAN 50 (Cyber Lab) zone assignment** — per the network doc roadmap, create a dedicated zone (not Internal) with narrow allow rules only for monitoring/scanning traffic back to `splunk.home.arpa` and `scanner.home.arpa`.
 
-- [ ] **Note the Splunk trial expiry date** and export saved searches/dashboards
-      before it converts to Free (Settings → Licensing).
+- [ ] **Note the Splunk trial expiry date** and export saved searches/dashboards before it converts to Free (Settings → Licensing).
 
 ---
 
 ## Phase 8 — Unified Dashboard & SOAR (Capstone)
 
-**Goal:** One Splunk view correlating Splunk-native telemetry (Sysmon/Auditd),
-OpenEDR (bridged via HEC), and OpenVAS (bridged via HEC) — the primary demo screen
-for the YouTube series / recruiter walkthrough. Then, once built, Splunk SOAR
-completes the pipeline: SIEM detects → SOAR orchestrates → Ansible executes.
-**Estimated time:** 4–6 hours for the dashboard bridge script; SOAR itself is a
-separate future build, not yet started.
+**Goal:** One Splunk view correlating Splunk-native telemetry (Sysmon/Auditd), OpenEDR (bridged via HEC), and OpenVAS (bridged via HEC) — the primary demo screen for the YouTube series / recruiter walkthrough. Then, once built, Splunk SOAR completes the pipeline: SIEM detects → SOAR orchestrates → Ansible executes.
+**Estimated time:** 4–6 hours for the dashboard bridge script; SOAR itself is a separate future build, not yet started.
 **VM:** Bridge script runs on the OpenEDR VM; dashboard built in Splunk
 (`splunk.home.arpa:8000`); SOAR (future) on `soar.home.arpa`
 
 ### Why OpenEDR and OpenVAS Need a Bridge Script
 
-Neither OpenEDR (data sits in OrientDB behind an SFTP receiver) nor OpenVAS
-(results live in its own scan-report database) writes a flat file Splunk's UF can
-just tail. Both need a small script that queries the source directly and pushes
-events into Splunk over its HTTP Event Collector (HEC, port 8088).
+Neither OpenEDR (data sits in OrientDB behind an SFTP receiver) nor OpenVAS (results live in its own scan-report database) writes a flat file Splunk's UF can just tail. Both need a small script that queries the source directly and pushes events into Splunk over its HTTP Event Collector (HEC, port 8088).
 
 ### Checklist
 
 **Enable Splunk HEC**
 
-- [ ] Splunk Web → Settings → Data Inputs → HTTP Event Collector → New Token
-      (one for `openedr-hec`, one for `openvas-hec`)
+- [ ] Splunk Web → Settings → Data Inputs → HTTP Event Collector → New Token (one for `openedr-hec`, one for `openvas-hec`)
 - [ ] Global Settings → set to **Enabled**
 - [ ] Confirm `openedr-events` and `openvas-scans` indexes exist
 - [ ] Verify HEC is reachable:
-      ```bash
-      curl -k https://splunk.home.arpa:8088/services/collector/health \
-        -H "Authorization: Splunk <token>"
-      ```
+```bash
+curl -k https://splunk.home.arpa:8088/services/collector/health \
+-H "Authorization: Splunk <token>"
+```
 
 **Build the Bridge Scripts**
 
@@ -958,7 +950,53 @@ sudo ss -tlnp | grep 3000    # Semaphore web
 **Cause:** Confirmed: Wazuh's Windows agent enforces a hardcoded ~260-character path limit for FIM (a legacy holdover from the old Windows `MAX_PATH` restriction), acknowledged as an open, unresolved limitation by the Wazuh dev team (GitHub issues #26801, #11583). The sheer number of files under `C:\Users` from ordinary dev-tool clutter (node_modules, extension caches, package folders) is what actually drove the file count that high.
 **Fix (as far as this got before the pivot):** Planned mitigation was adding `<ignore type="sregex">` entries (`node_modules`, `AppData\Local\Packages`, `.vscode\extensions`) to exclude high-churn, low-security-value folders from FIM scope rather than continuing to raise the numeric limit. Never confirmed/closed out before the decision to drop Wazuh entirely.
 
-*(No issues logged yet for the current stack — Splunk, OpenEDR, OpenVAS, Ansible+Semaphore. Log new issues below this line as they come up, same Symptom/Cause/Fix format.)*
+### Current-Stack Issue 1 — Laptop's Splunk `sourceHost` shows the Raspberry Pi's IP instead of its own
+**Symptom:** Querying `index=_internal sourcetype=splunkd group=tcpin_connections` for forwarder connections showed the laptop's `sourceHost` as the Raspberry Pi's IP (10.99.99.3) instead of the laptop's actual address. The `hostname` field correctly showed `fedora`.
+**Cause:** Not a misconfiguration — standard, documented Tailscale behavior. The Pi (10.99.99.3) acts as a Tailscale subnet router for remote access, and Tailscale performs SNAT (source network address translation) by default on subnet-router traffic, rewriting the source IP of anything routed through it to look like it came from the router itself once it crosses into the home network.
+**Fix:** Not fixed, and not going to be — accepted as a permanent limitation. Disabling SNAT on the Pi was considered but rejected: the Pi is also a Tailscale exit node, and Tailscale's own docs plus an open GitHub issue confirm disabling SNAT on a node that's both a subnet router and exit node risks breaking exit-node internet connectivity. A dedicated second subnet-router VM (which would sidestep the issue entirely) was also considered and explicitly rejected — no new VM will be built just for this.
+**Decision:** Use the `host` field (self-reported by the Universal Forwarder, unaffected by SNAT) for all laptop attribution in searches and dashboards — never `sourceHost` for this machine. Standing rule going forward for any Tailscale-connected device.
+
+```spl
+# Check forwarder connection + confirm hostname identity
+index=_internal sourcetype=splunkd group=tcpin_connections (connectionType=cooked OR connectionType=cookedSSL)
+| dedup hostname
+| table hostname, sourceHost, fwdType, guid, os, arch
+
+# Pull actual data from the laptop (primary query going forward)
+host=fedora earliest=-1h
+| sort - _time
+| table _time, index, sourcetype, source
+
+# Find the exact hostname string if unsure of casing
+| metadata type=hosts
+| table host, firstTime, lastTime, totalCount
+| sort - lastTime
+```
+
+### Current-Stack Issue 2 — Laptop's actual OS is Fedora, not Windows
+**Symptom:** The Phase 2 telemetry plan had assumed both Desktop and Laptop were Windows machines and routed both toward Sysmon + SwiftOnSecurity.
+**Cause:** Wrong assumption — the laptop is running Fedora Linux, discovered while working through the Splunk forwarder attribution issue above (`hostname` field reported `fedora`, not a Windows computer name).
+**Fix:** Laptop moved to the Auditd telemetry path instead of Sysmon (Phase 2 updated). OpenEDR's Windows-only agent doesn't apply to it either (Phase 3 updated) — the laptop's EDR-level coverage is out of scope for OpenEDR under the current stack; Auditd is its only detection path (see Phase 6, Test 4b).
+**Open item:** Desktop's actual OS was never independently confirmed either — it was assumed Windows by default, the same unverified-assumption mistake that caused this issue in the first place. Verify Desktop's real OS before treating any Sysmon/OpenEDR step in this doc as final for that machine.
+
+### Current-Stack Issue 3 — `splunkd` randomly crashing on `splunk.home.arpa` (intermittent, UI drops)
+**Symptom:** Running Splunk manually (`sudo su - splunk`, then `/opt/splunk/bin/splunk start`), `splunkd` would randomly go offline with no clear trigger — web UI became unreachable and the process had to be manually restarted. At one point the web UI also reported an IOWait warning shortly before a crash.
+**Ruled out:**
+- Kernel-level OOM — `journalctl -k | grep oom` clean, `free -h` showed 15Gi free at time of crash.
+- Disk exhaustion — `df -h` showed 79G free.
+- systemd cgroup memory limits — initially misdiagnosed against a nonexistent unit `Splunkd.service` (wrong name); the real unit is lowercase `splunk.service` (an LSB-wrapped SysV init script from `splunk enable boot-start`), and even checked correctly it had no memory limit configured.
+- Boot-start root-deprecation failure — `splunk.service` was separately found in a failed state (`Running Splunk Enterprise as root is deprecated`), but this is irrelevant to the live crashes since Splunk is being started manually via `sudo su - splunk`, not through that systemd path. Worth fixing eventually, not the cause here.
+- `_metrics` internal index STMgr error (`unexpected rc=-105 from st_txn_put`) — real, observed once preceding a crash, but never proven as root cause; likely just another downstream symptom.
+
+**Cause (part 1 — confirmed, addressed):** Live-tailing `splunkd.log` during a crash caught a Go panic — `attempt to tamper with binary: checksum changed[edge-processor-config]` — inside Splunk's internal sidecar/`TeleportSupervisorThread` architecture, tied to the `splunk_pipeline_builders` app's Edge Processor (SPL2) binary verification (OpAMP-based). This triggered a crash-restart loop that cascaded into cross-sidecar connection failures (postgres on `localhost:5435`, orchestrator on `localhost:39311`) and ultimately took down `splunkd` entirely. Note the `edge_processor_enabled = false` default in `server.conf` did **not** prevent this — the crash originated in a separate code path.
+**Fix (part 1):** Disabled the entire `splunk_pipeline_builders` app. Pipeline Builders / Edge Processor is an optional SPL2 data-preprocessing feature (filter/mask/enrich/route before indexing) aimed at large production deployments trimming ingest cost — unrelated to core indexing, search, dashboards, or alerting, so disabling it has zero functional impact on this build.
+
+**Cause (part 2 — confirmed, addressed):** Splunk kept crashing after the Pipeline Builders fix. A second live-tail caught the real underlying cause: `mongod` (Splunk's embedded KVStore, `mongod-8.0`) crashing with `exit code 4, status: PID killed by signal 4: Illegal instruction` (SIGILL), logged as `KV Store process terminated abnormally`. MongoDB 5.0+ requires AVX CPU instructions; `splunk.home.arpa` is a VM on the Bigmox Proxmox host, and Proxmox's default VM CPU type (`kvm64` / `x86-64-v2-AES`) does not expose AVX to the guest even when the physical host supports it. Every time KVStore died, dependent REST calls and the dashboard-studio install script began failing (`Connection refused ... localhost:5435`, `kvstore current status is failed`), and this instability is the more likely true root cause of the broader crash pattern — the Edge Processor panic may have just been one visible symptom riding on top of it.
+**Fix (part 2):** Change the VM's CPU type in Proxmox to `host` (or `x86-64-v3`) via `qm set <vmid> --cpu host`, then a full `qm stop`/`qm start` (a guest-level reboot does not re-negotiate CPU flags — they're set when the QEMU process starts). Verified post-change from inside the guest with `grep -o 'avx[0-9a-z_]*' /proc/cpuinfo | sort -u`.
+
+**Status:** Both fixes applied. Splunk has been stable since the CPU type change — **not yet confirmed long-term**, monitoring continues.
+
+*(Log new issues below this line as they come up, same Symptom/Cause/Fix format.)*
 
 ---
 
