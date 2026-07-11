@@ -270,7 +270,7 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
 - [x] **Repurpose the existing Wazuh VM into the Splunk VM**
       - OS stays Ubuntu 24.04 LTS — no reinstall needed, just uninstall Wazuh packages and install Splunk Enterprise instead
       - Current specs (8 vCPU / 16 GB / 50 GB, ZFS storage) were sized for Wazuh's indexer + dashboard + Splunk running together. Running Splunk alone is lighter — reasonable to right-size down over time, but there's no urgency; the extra headroom doesn't hurt anything sitting idle.
-      - **Open item:** the new stack's target spec for this VM is 4 vCPU / 8 GB / 100 GB. The disk bump (50 GB → 100 GB) is the one change worth actually doing given Splunk's own index storage needs — plan a disk resize during the repurposing pass.
+      - **Open item:** the disk bump (50 GB → 100 GB) is worth doing given Splunk's own index storage needs — plan a disk resize during the repurposing pass. ⚠️ **RAM target corrected, July 2026:** the original 8 GB target here was a pre-usage guess and turned out to sit below Splunk's real observed peak (~9 GB) — see Phase 4's "Sizing the rebuild" note. Actual target is now **4 vCPU / 12 GB / 100 GB**.
       - Fully uninstall Wazuh first (see Troubleshooting Log — Wazuh section, now deprecated/historical) before installing Splunk to avoid port/service conflicts.
 
 - [x] **Create OpenVAS VM on Minimox** (`scanner.home.arpa`) — ⚠️ **moved to Bigmox,
@@ -305,6 +305,33 @@ ip a show ens18    # or eth0/ens3 depending on Proxmox NIC naming
 - Proxmox VM creation: https://pve.proxmox.com/wiki/Qemu/KVM_Virtual_Machines
 - Greenbone Community Edition system requirements: https://greenbone.github.io/docs/latest/container/index.html
 - Semaphore UI installation guide: https://semaphoreui.com/docs/admin-guide/installation
+
+---
+
+> [!info] Standing policy — telemetry baseline for every Linux VM (July 2026)
+> Every Linux VM in this build gets the same three things, no exceptions decided
+> case-by-case:
+>
+> - **Auditd** — OS-level audit trail (auth, sudo, file/process watch rules)
+> - **Splunk Universal Forwarder** — ships Auditd's output to `splunk.home.arpa`
+>   (Auditd and UF are really one decision, not two — Auditd has nowhere to go
+>   without the UF)
+> - **Wazuh agent** — FIM, rootkit detection, active response
+>
+> **The one exception:** `wazuh-edr.home.arpa` (the Wazuh manager itself) gets
+> Auditd + UF, but *not* a Wazuh agent — it already watches its own filesystem via
+> its own default local `syscheck` block, so a separate agent pointed at itself
+> would be redundant.
+>
+> This wasn't the original plan — Phase 1's UF checklist and Phase 2's Auditd
+> checklist were both written before `scanner.home.arpa` and `ansible.home.arpa`
+> existed as their own VMs, and never got backfilled. Fixed below. The same
+> baseline applies to every future IAM VM (`idm.home.arpa`, `iam.home.arpa`,
+> `iam-apps.home.arpa`) from day one — see `Homelab-IAM-Build-Plan.md`.
+>
+> **Devices this doesn't apply to:** anything that can't run an agent at all —
+> the Netgear switch, IoT devices, game consoles. That's exactly what OpenVAS's
+> agentless scanning exists to cover instead (see Phase 4).
 
 ---
 
@@ -380,6 +407,8 @@ sudo /opt/splunk/bin/splunk enable boot-start
       Point each install at `splunk.home.arpa:9997` as the receiving indexer.
       Actual per-source input configuration (Sysmon channel, Auditd file monitor)
       is covered in Phase 2.
+
+- [ ] ⚠️ **Gap found July 2026:** this list was written before `scanner.home.arpa` and `ansible.home.arpa` existed as their own VMs — install the UF on both, same as every other Linux host, per the standing telemetry policy above. `wazuh-edr.home.arpa` already has one (Phase 3, Step 4). Every future IAM VM gets one too, from day one — see `Homelab-IAM-Build-Plan.md`.
 
 - [x] Verify data is flowing once Phase 2 inputs are configured:
 ```spl
@@ -486,7 +515,12 @@ Restart the UF service after editing.
 index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 ```
 
-### Linux — Auditd (Pi, Bigmox host, Minimox host, Laptop — Fedora)
+### Linux — Auditd (Pi, Bigmox host, Minimox host, Laptop — Fedora, `scanner.home.arpa`, `ansible.home.arpa`)
+
+> ⚠️ **Gap found July 2026:** `scanner.home.arpa` and `ansible.home.arpa` were
+> missing from this list — same reason as the Phase 1 UF gap above, this section
+> predates both VMs. Same steps below apply to them, no differences. Every future
+> IAM VM gets this too, from day one.
 
 - [x] Install and enable auditd:
 ```bash
@@ -730,6 +764,13 @@ sudo systemctl start wazuh-agent
 sudo /var/ossec/bin/agent_control -l
 ```
 
+- [ ] ⚠️ **Scope note, July 2026:** this step only ever covered the two workstation
+      endpoints. Per the standing telemetry policy earlier in this doc, `scanner.home.arpa`
+      and `ansible.home.arpa` need a Wazuh agent too — every Linux server VM gets one,
+      not just workstations. Rather than a third manual install here, this is being
+      done through Phase 5's Ansible pipeline instead, so agent package install and
+      FIM/config land together in one playbook run per host. See Phase 5.
+
 **Step 4 — Splunk UF on the Wazuh VM, tailing alerts.json**
 
 - [x] Retire the `openedr-events` index (Settings → Indexes) and create `wazuh-alerts` in its place at the same **40 GB** allocation — reuses the existing 190 GB shared volume budget from Phase 1 rather than adding a new index on top of it. There's no OpenEDR historical data worth preserving.
@@ -820,43 +861,47 @@ where the freed-up OpenEDR room actually gets used. See `Homelab-Server-VM-Specs
 for the full RAM math on both hosts.
 
 **Sizing the rebuild:** starting at Greenbone's own documented minimum, **8 GB**
-RAM / 4 vCPU (up from the 4 GB that proved insufficient) — not jumping straight to
-12 GB, since Bigmox still needs to absorb Splunk SOAR (8 GB, planned) and Keycloak
-(4 GB, planned) later, and there's a pending, still-undone trim of Splunk's own
-footprint from its actual 16 GB down to its documented 8 GB target. That trim
-should happen before OpenVAS gets pushed past 8 GB — it's what actually creates
-the room. Re-pull real Proxmox usage after this rebuild and a full scan cycle
-before deciding whether 8 GB genuinely holds or needs to go to 10–12 GB.
+RAM / 4 vCPU (up from the 4 GB that proved insufficient).
+
+**Update — Splunk trim actually happened, with real numbers instead of a guess:**
+the "trim Splunk down" open item had been sitting on an untested **8 GB** target
+since the original repurposing. Actual observed usage (a few days of Splunk
+running alone, no Wazuh indexer/dashboard alongside it) never went past **9 GB** —
+meaning the old 8 GB target was already *below* real peak usage and would have
+been the wrong number to trim to. Trimmed to **12 GB** instead (16 → 12), which
+gives Splunk ~3 GB of headroom above its observed ceiling rather than sitting
+right at it. See the Right-Size checklist item and `Homelab-Server-VM-Specs.md`
+for the resize commands and updated spec.
+
+That trim alone frees the room OpenVAS needs — today's actual Bigmox math is
+Splunk 12 GB + OpenVAS 8 GB = 20 GB of 31.29 GiB, comfortable with room to spare.
+The tighter math only shows up once Splunk SOAR (8 GB, planned) and Keycloak
+(4 GB, planned) actually get built — 12 + 8 + 8 + 4 = 32 GB, right at/slightly
+over the 31.29 GiB ceiling depending on whether OpenVAS ends up needing more than
+8 GB. Not an immediate problem; re-run this math once SOAR and Keycloak are real
+and OpenVAS's post-rebuild usage is known, same as every other "re-run once built"
+note in this doc.
 
 ### Checklist
 
-- [ ] **Destroy the old `scanner.home.arpa` VM on Minimox** (data isn't worth
+- [x] **Destroy the old `scanner.home.arpa` VM on Minimox** (data isn't worth
       preserving — Greenbone's own feed will just re-sync fresh) and create a new
       VM on **Bigmox**:
       - OS: Ubuntu 22.04 LTS
-      - Resources: **4 vCPU, 8 GB RAM, 100 GB disk** (RAM raised from the 4 GB
-        that proved insufficient; disk unchanged, still plenty for feed + scan
-        data)
-      - Network bridge: `vmbr0` (VLAN 40) — same bridge/VLAN as Minimox, so
-        `scanner.home.arpa` keeps the same IP, `10.40.40.14`; no DNS change
-        needed.
+      - Resources: **4 vCPU, 8 GB RAM, 100 GB disk** (RAM raised from the 4 GB that proved insufficient; disk unchanged, still plenty for feed + scan data)
+      - Network bridge: `vmbr0` (VLAN 40) — same bridge/VLAN as Minimox, so `scanner.home.arpa` keeps the same IP, `10.40.40.14`; no DNS change needed.
 
-- [ ] Update the DHCP reservation for `scanner.home.arpa` in
-      `Homelab-Network-Documentation.md` — the new VM has a new virtual NIC (new
-      MAC address), so the existing MAC-based reservation for `10.40.40.14` needs
-      to point at the new VM's MAC, not the old one.
+- [x] Update the DHCP reservation for `scanner.home.arpa` in `Homelab-Network-Documentation.md` — the new VM has a new virtual NIC (new MAC address), so the existing MAC-based reservation for `10.40.40.14` needs to point at the new VM's MAC, not the old one.
 
-- [ ] Confirm DNS still resolves correctly post-rebuild:
+- [x] Confirm DNS still resolves correctly post-rebuild:
 ```bash
 nslookup scanner.home.arpa
 ```
 
-- [ ] Install Docker + Docker Compose on the OpenVAS VM (official Docker CE
-      apt-repo install — Phase 3 no longer uses Docker now that it's Wazuh's
-      native packages instead of the old jymcheong Docker stack):
+- [x] Install Docker + Docker Compose on the OpenVAS VM (official Docker CE apt-repo install — Phase 3 no longer uses Docker now that it's Wazuh's native packages instead of the old jymcheong Docker stack):
 ```bash
 for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-  sudo apt-get remove -y $pkg
+sudo apt-get remove -y $pkg
 done
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl
@@ -875,7 +920,7 @@ sudo systemctl status docker
 docker compose version
 ```
 
-- [ ] Pull Greenbone's official Community Container compose file. **Verified July 2026** — the file was renamed from `docker-compose.yml` to `compose.yaml` upstream; the old filename no longer exists at this path (the doc's previous command was also just broken — the URL had gotten split across lines):
+- [x] Pull Greenbone's official Community Container compose file. **Verified July 2026** — the file was renamed from `docker-compose.yml` to `compose.yaml` upstream; the old filename no longer exists at this path (the doc's previous command was also just broken — the URL had gotten split across lines):
 ```bash
 mkdir -p ~/openvas && cd ~/openvas
 curl -f -L https://greenbone.github.io/docs/latest/_static/compose.yaml -o compose.yaml
@@ -899,7 +944,7 @@ docker compose up -d
 docker compose logs -f gvmd
 ```
 
-- [ ] Access the Greenbone Security Assistant (GSA) web UI at
+- [x] Access the Greenbone Security Assistant (GSA) web UI at
       `https://scanner.home.arpa` (self-signed cert auto-generated by the
       `gvm-config`/`nginx` containers on first start — accept the browser
       warning). **Modern Greenbone containers no longer ship a fixed
@@ -1018,6 +1063,44 @@ The `5712` rule ID still isn't independently verified against the installed
 ruleset — check `grep -r 'id="5712"' /var/ossec/ruleset/rules/` on the manager
 before trusting it, same caveat as when this was first drafted in Phase 3.
 
+### Second Target — Wazuh Agent Rollout to Server VMs
+
+Per the standing telemetry policy earlier in this doc, `scanner.home.arpa` and
+`ansible.home.arpa` both need a Wazuh agent (Phase 3 only ever installed agents
+on the two workstation endpoints, Desktop and Laptop). Rather than a third round
+of manual `dnf`/`apt` commands, this is the actual point of having Ansible
+manage Wazuh at all — package install and enrollment become one more playbook
+against the same `wazuh` group pattern used above, and every future IAM VM
+inherits this for free once it's in inventory:
+
+```yaml
+- hosts: linux_servers   # scanner.home.arpa, ansible.home.arpa, future IAM VMs
+  become: true
+  tasks:
+    - name: Add Wazuh apt repo
+      # same GPG key / repo steps as Phase 3, Step 2 — sudo on the gpg side of
+      # the pipe, not curl (see Phase 3's documented gotcha)
+      ...
+
+    - name: Install wazuh-agent
+      ansible.builtin.apt:
+        name: wazuh-agent
+        state: present
+      environment:
+        WAZUH_MANAGER: "10.40.40.13"
+
+    - name: Enable and start wazuh-agent
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        enabled: true
+        state: started
+```
+No FIM/active-response config needed on these agents beyond the manager's own
+default group — they're server infrastructure, not Windows workstations, so the
+`windows` group config above doesn't apply. Confirm enrollment the same way as
+Phase 3: `sudo /var/ossec/bin/agent_control -l` on the manager should list both
+as `Active`.
+
 ### Checklist
 
 - [ ] Install Ansible on the VM:
@@ -1044,7 +1127,9 @@ sudo apt update && sudo apt install -y ansible
       Ansible's `winrm` connection plugin; budget extra time here).
 
 - [ ] Build a basic inventory in Semaphore covering all endpoints, grouped by OS,
-      including a `wazuh` group containing just `wazuh-edr.home.arpa`.
+      including a `wazuh` group containing just `wazuh-edr.home.arpa`, and a
+      `linux_servers` group containing `scanner.home.arpa` and `ansible.home.arpa`
+      (add each future IAM VM to this group as it's built).
 
 - [ ] Run a first read-only playbook against each OS type (e.g., a fact-gathering
       or patch-check playbook) to confirm SSH/WinRM connectivity actually works
@@ -1065,6 +1150,11 @@ sudo systemctl status wazuh-manager
 - [ ] Re-run the same playbook a second time and confirm Ansible reports the
       tasks as unchanged (not re-applied) — this is the actual point of doing it
       this way instead of by hand: idempotent, safe to rerun after a VM rebuild.
+
+- [ ] Write and run the agent-rollout playbook from "Second Target" above against
+      the `linux_servers` group — installs and enrolls the Wazuh agent on
+      `scanner.home.arpa` and `ansible.home.arpa`, closing the gap flagged in
+      Phase 3. Confirm both show `Active` via `agent_control -l` on the manager.
 
 ### Sources
 - Semaphore UI installation guide: https://semaphoreui.com/docs/admin-guide/installation
@@ -1253,8 +1343,15 @@ curl -k https://splunk.home.arpa:8088/services/collector/health \
 - [ ] Explore Atomic Red Team for structured attack simulation on VLAN 50
 - [ ] Splunk SOAR is the final piece before the build is "done" for the YouTube
       series — schedule it last, after Phases 1–7 are stable
-- [ ] Right-size the Splunk VM's CPU/RAM down from its Wazuh-era 8 vCPU/16 GB
-      once Splunk-alone resource usage is actually observed for a few days
+- [ ] Right-size the Splunk VM's RAM down from its Wazuh-era 16 GB — observed
+      usage never exceeded 9 GB over several days of Splunk running alone, so
+      trim to **12 GB** (not the old untested 8 GB target, which actually sat
+      below the real observed peak) via `qm set <vmid> --memory 12288` on Bigmox
+      (shut the VM down first — memory hot-plug isn't guaranteed to reflect
+      correctly inside the guest for a downsize; safest as `qm shutdown <vmid>`
+      → `qm set <vmid> --memory 12288` → `qm start <vmid>`).
+      vCPU right-size (8 → 4) still open, lower priority — it isn't blocking
+      anything else's headroom the way the memory trim was.
 
 ---
 
@@ -1274,6 +1371,39 @@ missing-data search) stay as ordered code blocks since sequence matters there.
 | `sudo /opt/splunk/bin/splunk status` | Confirm it's actually running |
 
 ### Splunk Universal Forwarder (any endpoint)
+
+**Download + install** (check https://www.splunk.com/en_us/download/universal-forwarder.html
+for the current version — `9.x.x` below is a placeholder, same convention as the
+Enterprise install in Phase 1):
+
+```bash
+# Ubuntu/Debian (scanner.home.arpa, ansible.home.arpa, Pi, Bigmox/Minimox hosts)
+wget -O splunkforwarder.deb 'https://download.splunk.com/products/universalforwarder/releases/\
+9.x.x/linux/splunkforwarder-9.x.x-linux-2.6-amd64.deb'
+sudo dpkg -i splunkforwarder.deb
+sudo /opt/splunkforwarder/bin/splunk start --accept-license
+sudo /opt/splunkforwarder/bin/splunk enable boot-start
+```
+
+```bash
+# Fedora/RHEL (Laptop)
+wget -O splunkforwarder.rpm 'https://download.splunk.com/products/universalforwarder/releases/\
+9.x.x/linux/splunkforwarder-9.x.x-linux-x86_64.rpm'
+sudo rpm -i splunkforwarder.rpm
+sudo /opt/splunkforwarder/bin/splunk start --accept-license
+sudo /opt/splunkforwarder/bin/splunk enable boot-start
+```
+
+```powershell
+# Windows (Desktop) — download the .msi from the same page, then:
+msiexec.exe /i splunkforwarder.msi AGREETOLICENSE=Yes RECEIVING_INDEXER="splunk.home.arpa:9997" WINEVENTLOG_SEC_ENABLE=1 /quiet
+```
+
+**Configure — point it at the indexer** (not automatic on Linux; the Windows
+`.msi` flags above already do this at install time):
+```bash
+sudo /opt/splunkforwarder/bin/splunk add forward-server splunk.home.arpa:9997 -auth admin:<password>
+```
 
 | Command | What it does |
 |---|---|
@@ -1301,18 +1431,46 @@ missing-data search) stay as ordered code blocks since sequence matters there.
 
 ### Auditd (Linux endpoints)
 
+**Install + enable:**
+```bash
+sudo apt install -y auditd audispd-plugins
+sudo systemctl enable --now auditd
+```
+
+**Configure** — CIM-friendly log format + a readable log group (edit
+`/etc/audit/auditd.conf`: `log_format = ENRICHED`, `log_group = splunk` or
+whichever group the UF runs as), then add the homelab's watch rules:
+```bash
+sudo nano /etc/audit/rules.d/homelab.rules
+```
+```
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-w /etc/sudoers -p wa -k sudoers_changes
+-a always,exit -F arch=b64 -S execve -k exec_commands
+```
+```bash
+sudo augenrules --load
+sudo auditctl -l                             # confirm all four rules loaded
+```
+Then point the UF at the log (`/opt/splunkforwarder/etc/system/local/inputs.conf`):
+```ini
+[monitor:///var/log/audit/audit.log]
+index = linux-audit
+sourcetype = linux:audit
+disabled = false
+```
+```bash
+sudo /opt/splunkforwarder/bin/splunk restart
+```
+Full walkthrough with the benign-warning caveats (`Old style watch rules are
+slower`, `lost 0` vs. `failure 1`) is in Phase 2.
+
 | Command | What it does |
 |---|---|
 | `sudo systemctl status auditd` | Confirm the daemon is running |
 | `sudo auditctl -l` | List active rules |
 | `sudo tail -f /var/log/audit/audit.log` | Live audit log |
-
-Persisting custom rules (live `auditctl` commands don't survive a reboot):
-```bash
-sudo nano /etc/audit/rules.d/homelab.rules   # rule syntax, no auditctl/sudo prefix
-sudo augenrules --load
-sudo auditctl -l                             # confirm rules loaded
-```
 
 ### Sysmon (Windows endpoints)
 
@@ -1331,7 +1489,49 @@ sudo auditctl -l                             # confirm rules loaded
 | `docker compose down` | Tear the stack down (keeps volumes) |
 | `docker compose up -d` | Bring the stack back up, detached |
 
-### Wazuh (manager: `wazuh-edr.home.arpa`; agents: Desktop, Laptop)
+### Wazuh (manager: `wazuh-edr.home.arpa`; agents: Desktop, Laptop, `scanner.home.arpa`, `ansible.home.arpa`)
+
+**Download + install the agent** — manager is always `10.40.40.13`:
+
+```bash
+# Ubuntu (scanner.home.arpa, ansible.home.arpa — same repo method as the
+# manager install in Phase 3, Step 2; sudo goes on the gpg side of the pipe)
+curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+sudo chmod 644 /usr/share/keyrings/wazuh.gpg
+echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | sudo tee -a /etc/apt/sources.list.d/wazuh.list
+sudo apt-get update
+sudo WAZUH_MANAGER="10.40.40.13" apt-get install -y wazuh-agent
+sudo systemctl daemon-reload
+sudo systemctl enable wazuh-agent
+sudo systemctl start wazuh-agent
+```
+
+```bash
+# Fedora (Laptop)
+sudo rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
+sudo tee /etc/yum.repos.d/wazuh.repo > /dev/null <<EOF
+[wazuh]
+gpgcheck=1
+gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
+enabled=1
+name=EL-\$releasever - Wazuh
+baseurl=https://packages.wazuh.com/4.x/yum/
+priority=1
+EOF
+sudo WAZUH_MANAGER="10.40.40.13" dnf install -y wazuh-agent
+sudo systemctl daemon-reload
+sudo systemctl enable wazuh-agent
+sudo systemctl start wazuh-agent
+```
+
+```powershell
+# Windows (Desktop)
+msiexec.exe /i wazuh-agent.msi /q WAZUH_MANAGER="10.40.40.13" WAZUH_REGISTRATION_SERVER="10.40.40.13"
+NET START WazuhSvc
+```
+
+After any install, confirm enrollment from the manager: `sudo /var/ossec/bin/agent_control -l`
+should list the new host as `Active` within a minute or two.
 
 | Command | What it does |
 |---|---|
@@ -1349,7 +1549,7 @@ Windows agent (Desktop):
 | `Get-Service WazuhSvc` | Confirm the agent service is running |
 | `Restart-Service WazuhSvc` | Required after any centralized syscheck/config change |
 
-Linux agent (Laptop, Fedora):
+Linux agent (Laptop/Fedora, `scanner.home.arpa`, `ansible.home.arpa` — same commands regardless of distro):
 
 | Command | What it does |
 |---|---|

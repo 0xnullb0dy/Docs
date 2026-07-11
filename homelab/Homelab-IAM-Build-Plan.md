@@ -12,6 +12,21 @@
 > firewall zones, DNS convention) and reuses the same VLAN 40 / `home.arpa` pattern
 > established for the SOC build in `Homelab-SOC-Build-Plan.md`. Check
 > `Homelab-Server-VM-Specs.md` for current Bigmox/Minimox headroom before sizing new VMs.
+>
+> **Telemetry baseline (July 2026):** every Linux VM built here — `idm.home.arpa`,
+> `iam.home.arpa`, `iam-apps.home.arpa` — gets Auditd + Splunk Universal Forwarder +
+> Wazuh agent from day one, same as every other Linux VM in the SOC build. This is a
+> standing policy documented in `Homelab-SOC-Build-Plan.md` (right before its Phase 1);
+> don't treat it as optional or bolt it on after the fact the way it got missed for
+> `scanner.home.arpa`/`ansible.home.arpa` there. Add each VM to the SOC build's
+> `linux_servers` Ansible group as it's built — Phase 7 below covers Keycloak's own
+> *application*-level audit log separately; that's on top of this baseline, not instead
+> of it.
+>
+> ⚠️ **This document otherwise predates the SOC build's Wazuh pivot and IP renumbering**
+> (still references `wazuh.home.arpa` and pre-renumbering IPs in places) — needs its own
+> cleanup pass, not done as part of this note. Don't trust IPs/hostnames elsewhere in
+> this file without cross-checking `Homelab-Server-VM-Specs.md` first.
 
 ---
 

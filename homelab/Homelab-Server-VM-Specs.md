@@ -90,12 +90,19 @@ making any sizing decision for new VMs.
 > planned IAM VMs (8 GB) = 14 GB against 15.34 GiB physical — still fits, with less
 > margin than the OpenEDR→Wazuh trim alone would have given, since that freed room
 > effectively went to keeping the IAM VMs feasible rather than staying as pure
-> slack. Bigmox picks up the harder question: Splunk (actual 16 GB, target 8 GB) +
-> OpenVAS (8 GB) + Splunk SOAR (8 GB, planned) + Keycloak (4 GB, planned) only fits
-> inside 31.29 GiB if the long-deferred Splunk trim to 8 GB actually happens before
-> SOAR and Keycloak get built — worth re-checking the Keycloak-stays-on-Bigmox
-> decision above once that trim happens and OpenVAS's real post-rebuild usage is
-> known.
+> slack.
+>
+> **Third update (July 2026) — Splunk RAM trim, based on real usage:** the
+> long-deferred Splunk trim happened, but not to the old untested 8 GB target —
+> real observed usage (Splunk running alone, several days) peaked at 9 GB, so 8 GB
+> would have been undersized. Trimmed 16 GB → **12 GB** instead. Bigmox's math:
+> Splunk (12 GB) + OpenVAS (8 GB) + Splunk SOAR (8 GB, planned) + Keycloak (4 GB,
+> planned) = 32 GB against 31.29 GiB physical — right at the edge, over by
+> roughly the same margin the old math had headroom, and that's *before* knowing
+> whether OpenVAS ends up needing more than 8 GB under real scan load. Not urgent
+> today (Splunk 12 GB + OpenVAS 8 GB = 20 GB right now, comfortable), but
+> re-check this — and the Keycloak-stays-on-Bigmox decision above — once SOAR and
+> Keycloak actually get built and OpenVAS's real post-rebuild usage is known.
 
 ### Mini/Big Swap Reminder
 
@@ -112,7 +119,7 @@ All VMs currently documented, across both source files:
 
 | VM / Hostname | Host | Purpose | OS | vCPU | RAM | Disk | Storage Backend | Network / VLAN | IP |
 |---|---|---|---|---|---|---|---|---|---|
-| `splunk.home.arpa` *(repurposed from `wazuh.home.arpa`, then fully rebuilt July 10, 2026 after disk/RAM/BIOS issues — see SOC Build Plan Current-Stack Issue 4)* | Bigmox | Splunk Enterprise — primary SIEM | Ubuntu 24.04 LTS | 8 vCPU *(current — target is 4 vCPU, see note)* | 16 GB *(current — target is 8 GB)* | 250 GB | ZFS *(single-disk vdev on new `Storage` pool; mirroring ruled out as not possible on this hardware — see SOC Build Plan Current-Stack Issue 4)* | `vmbr0`, VLAN 40 | 10.40.40.12 |
+| `splunk.home.arpa` *(repurposed from `wazuh.home.arpa`, then fully rebuilt July 10, 2026 after disk/RAM/BIOS issues — see SOC Build Plan Current-Stack Issue 4)* | Bigmox | Splunk Enterprise — primary SIEM | Ubuntu 24.04 LTS | 8 vCPU *(current — target is 4 vCPU, see note)* | 16 GB → **12 GB** *(right-sized July 2026 based on real observed usage — see note)* | 250 GB | ZFS *(single-disk vdev on new `Storage` pool; mirroring ruled out as not possible on this hardware — see SOC Build Plan Current-Stack Issue 4)* | `vmbr0`, VLAN 40 | 10.40.40.12 |
 | `wazuh-edr.home.arpa` *(renamed from `openedr.home.arpa`, rebuilt fresh July 2026 — see SOC Build Plan Phase 3)* | Minimox | Wazuh manager + agent-only EDR — file integrity monitoring, rootkit detection, vulnerability detection, active response; no indexer/dashboard, alerts forwarded to Splunk via UF | Ubuntu 22.04 LTS | 2 vCPU | 4 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.13 |
 | `scanner.home.arpa` *(moved from Minimox, July 2026 — outgrew its RAM allocation)* | Bigmox | OpenVAS / Greenbone Community Edition — agentless vulnerability scanning across all VLANs | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.14 |
 | `ansible.home.arpa` *(moved from Bigmox, July 2026 — swapped with OpenVAS)* | Minimox | Ansible + Semaphore — config management / automation execution layer (future SOAR target); also the Wazuh manager config-as-code target (see SOC Build Plan Phase 5) | Ubuntu 24.04 LTS | 2 vCPU | 2 GB | 20 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.15 |
@@ -168,12 +175,22 @@ All VMs currently documented, across both source files:
 > moved to Minimox in its place. See the Decision callout above and SOC Build
 > Plan Phase 4 for the full math.
 
-> [!note] Splunk VM resource sizing — right-sizing pending
+> [!note] Splunk VM resource sizing — RAM trim done with real data (July 2026)
 > The VM's original 8 vCPU / 16 GB / 50 GB was sized for Wazuh's indexer + dashboard
 > running alongside Splunk — a real bottleneck was hit during that install (the
 > dashboard's one-time bundling step alone could exhaust 12 GB of RAM). Running
-> Splunk alone is lighter; the target CPU/RAM spec is still 4 vCPU / 8 GB — no
-> urgency on that trim, the extra headroom sitting idle doesn't hurt anything.
+> Splunk alone is lighter, but the original "target 8 GB" figure floating around
+> this doc was a pre-usage guess, never actually checked against real load.
+>
+> **Once Splunk had a few days running alone**, observed usage never exceeded
+> **9 GB** — meaning that old 8 GB target was already *below* real peak and would
+> have been the wrong number to trim to (risking Splunk hitting its own ceiling
+> during normal indexing/search spikes). Trimmed to **12 GB** instead of 8 GB —
+> about 3 GB of headroom above the observed peak rather than none. This is also
+> what unlocked room on Bigmox for the OpenVAS move (see the host-swap notes
+> above and SOC Build Plan Phase 4). vCPU right-size (8 → 4) is still open but
+> lower priority — it wasn't blocking anything else's RAM headroom.
+>
 > Disk was provisioned at 250 GB during the July 10, 2026 rebuild (see SOC Build
 > Plan Current-Stack Issue 4 for why a rebuild was needed) — larger than the originally planned
 > 100 GB, to give real headroom for index growth plus safety margin above
