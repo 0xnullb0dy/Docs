@@ -2,10 +2,11 @@
 
 > **Purpose**
 > This is the active planning runbook and progress tracker for the homelab SOC layer
-> on top of the existing UniFi/VLAN network. It covers Splunk (primary SIEM), OpenEDR
-> (dedicated EDR console), OpenVAS/Greenbone (vulnerability scanning), Ansible +
-> Semaphore (automation/config management), and — planned next — Splunk SOAR
-> (orchestration). All running on-prem with zero cloud dependencies.
+> on top of the existing UniFi/VLAN network. It covers Splunk (primary SIEM), Wazuh
+> (EDR-only role — manager + agent, no indexer/dashboard), OpenVAS/Greenbone
+> (vulnerability scanning), Ansible + Semaphore (automation/config management), and
+> — planned next — Splunk SOAR (orchestration). All running on-prem with zero cloud
+> dependencies.
 >
 > **Pivot note (July 2026):** Wazuh was originally the centerpiece of this build and
 > a huge amount of real troubleshooting happened getting it running (see the
@@ -15,6 +16,14 @@
 > descriptions, and SPL is a directly testable interview skill in a way Wazuh's query
 > language generally isn't. The Wazuh VM itself wasn't scrapped — it was repurposed
 > into the new Splunk VM (same IP, same host, new OS role).
+>
+> **Second pivot note (July 2026) — EDR layer:** OpenEDR (both the jymcheong fork and
+> ComodoSecurity's original project) was dropped from the EDR role — see Phase 3 for
+> the full story. Wazuh is back in the stack, but narrowly and deliberately: manager +
+> agent only, no indexer, no dashboard. It functions purely as an EDR engine (file
+> integrity monitoring, rootkit detection, active response) whose alerts forward into
+> Splunk the same way Sysmon and Auditd do. This does not reopen the SIEM decision
+> above — Splunk remains the only dashboard/query surface in the whole stack.
 >
 > **Cross-reference:** This document is a direct continuation of
 > `Homelab-Network-Documentation.md` (VLANs, hostnames, firewall rules) and
@@ -127,9 +136,13 @@ Hostname              | IP            | VLAN | VM Host  | Purpose
 ----------------------|---------------|------|----------|------------------------------------
 splunk.home.arpa      | 10.40.40.12   | 40   | Bigmox   | Splunk Enterprise — primary SIEM
                        |               |      |          | (repurposed from the old Wazuh VM)
-openedr.home.arpa     | 10.40.40.13   | 40   | Minimox  | OpenEDR backend (Docker/OrientDB)
-scanner.home.arpa     | 10.40.40.14   | 40   | Minimox  | OpenVAS (Greenbone) — vuln scanning
-ansible.home.arpa     | 10.40.40.15   | 40   | Bigmox   | Ansible + Semaphore — automation
+wazuh-edr.home.arpa    | 10.40.40.13   | 40   | Minimox  | Wazuh manager + agent-only EDR
+                       |               |      |          | (rebuilt fresh from the old OpenEDR VM,
+                       |               |      |          | July 2026 — no indexer/dashboard)
+scanner.home.arpa     | 10.40.40.14   | 40   | Bigmox   | OpenVAS (Greenbone) — vuln scanning
+                       |               |      |          | (moved from Minimox, July 2026 — RAM)
+ansible.home.arpa     | 10.40.40.15   | 40   | Minimox  | Ansible + Semaphore — automation
+                       |               |      |          | (moved from Bigmox, July 2026 — RAM)
 soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — planned, not yet built
 ```
 
@@ -141,11 +154,17 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
 > updated IAM addresses — this doc is the source of truth for `.12`–`.16`.
 
 > **Why split across hosts?**
-> Splunk's indexer and OpenEDR's ELK-style backend are both meaningful resource
-> consumers — stacking everything on one Proxmox host risks starving both. Bigmox
-> (direct LAN 2 connection) carries Splunk + Ansible/Semaphore + the future SOAR
-> instance; Minimox carries OpenEDR + OpenVAS. This keeps load balanced and means
-> one host going down doesn't kill your entire monitoring/scanning capability.
+> Splunk's indexer is the heaviest resource consumer in this stack — stacking
+> everything on one Proxmox host risks starving it. Bigmox (direct LAN 2 connection,
+> 31.29 GiB RAM) carries Splunk + OpenVAS + the future SOAR instance; Minimox
+> (15.34 GiB RAM) carries the Wazuh EDR manager (deliberately light now that there's
+> no indexer/dashboard on it) + Ansible/Semaphore. This keeps load balanced and
+> means one host going down doesn't kill your entire monitoring/scanning capability.
+>
+> **Updated (July 2026):** OpenVAS and Ansible swapped hosts — OpenVAS moved to
+> Bigmox because it outgrew Minimox's smaller RAM pool once real scan load
+> exceeded its original 4 GB allocation; Ansible (light at 2 GB) moved to Minimox
+> in its place. See Phase 4's "Why This Moved" note for the full math.
 
 ---
 
@@ -155,47 +174,57 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
                         VLAN 40 — Servers (10.40.40.0/24)
  ┌────────────────────────────────────────────────────────────────────────────┐
  │                                                                            │
- │  ┌─────────────────────┐  ┌────────────────┐  ┌───────────────────────┐    │
- │  │ splunk.home.arpa     │  │ openedr.home.arpa│ │ scanner.home.arpa     │  │
- │  │ 10.40.40.12 (Bigmox) │  │ 10.40.40.13 (Minimox)│ 10.40.40.14 (Minimox)│  │
- │  │ Splunk Enterprise    │  │ Docker: OrientDB │  │ OpenVAS / Greenbone   │  │
- │  │ (primary SIEM)       │  │ + SFTP + web UI  │  │ (agentless scanner)  │  │
- │  └──────────┬───────────┘  └────────┬─────────┘  └──────────┬────────────┘  │
- │             │                       │                       │              │
- │  ┌──────────┴───────────┐          │            (scans every VLAN/IP,      │
- │  │ ansible.home.arpa     │          │             no agent required)       │
- │  │ 10.40.40.15 (Bigmox)  │          │                                      │
- │  │ Ansible + Semaphore   │          │                                      │
- │  └──────────┬───────────┘          │                                      │
- │             │                       │                                      │
- │  ┌──────────┴───────────┐          │                                      │
- │  │ soar.home.arpa (future)│          │                                      │
- │  │ 10.40.40.16 (Bigmox)  │          │                                      │
- │  │ Splunk SOAR CE        │          │                                      │
- │  └───────────────────────┘          │                                      │
- └──────────────┬──────────────────────┼──────────────────────────────────────┘
-                │ Splunk UF            │ OpenEDR Windows agent
-                │ (Sysmon+SwiftOnSecurity /│ telemetry
-                │  Auditd)             │
- ┌──────────────▼──────────────────────▼──────────────────────────────────────┐
+ │  ┌─────────────────────┐  ┌────────────────────┐  ┌───────────────────────┐│
+ │  │ splunk.home.arpa     │  │ wazuh-edr.home.arpa│ │ scanner.home.arpa     ││
+ │  │ 10.40.40.12 (Bigmox) │  │ 10.40.40.13 (Minimox)│ 10.40.40.14 (Bigmox) ││
+ │  │ Splunk Enterprise    │  │ Wazuh manager only  │  │ OpenVAS / Greenbone  ││
+ │  │ (primary SIEM)       │  │ (no indexer/dash)   │  │ (agentless scanner) ││
+ │  └──────────┬───────────┘  └──────────┬──────────┘  └──────────┬───────────┘│
+ │             │                         │                        │            │
+ │  ┌──────────┴───────────┐            │            (scans every VLAN/IP,    │
+ │  │ ansible.home.arpa     │            │             no agent required)     │
+ │  │ 10.40.40.15 (Minimox) │            │                                    │
+ │  │ Ansible + Semaphore   │            │                                    │
+ │  └──────────┬───────────┘            │                                    │
+ │             │                         │                                    │
+ │  ┌──────────┴───────────┐            │                                    │
+ │  │ soar.home.arpa (future)│            │                                    │
+ │  │ 10.40.40.16 (Bigmox)  │            │                                    │
+ │  │ Splunk SOAR CE        │            │                                    │
+ │  └───────────────────────┘            │                                    │
+ └──────────────┬────────────────────────┼────────────────────────────────────┘
+                │ Splunk UF              │ Wazuh agent (FIM, rootkit
+                │ (Sysmon+SwiftOnSecurity │ detection, active response) —
+                │  Auditd)               │ Wazuh UF on the manager VM
+                │                        │ tails alerts.json into Splunk
+ ┌──────────────▼────────────────────────▼──────────────────────────────────┐
  │  VLAN 1 (Main LAN)                       VLAN 99 (Mgmt)   VLAN 20 (IoT)   │
  │  Desktop 10.10.10.x — OS unconfirmed,    Pi 10.99.99.3     iPhone/iPad    │
- │    telemetry plan pending (see Phase 2)  (Splunk UF        (OpenVAS      │
+ │    telemetry + Wazuh agent plan pending  (Splunk UF        (OpenVAS      │
  │  Laptop  10.10.10.x — Fedora Linux        + Auditd)         scan target  │
- │    (Auditd + Splunk UF; no OpenEDR —                          only,     │
- │     agent is Windows-only, not applicable)                    no agent) │
+ │    (Auditd + Splunk UF + Wazuh agent —                        only,     │
+ │     Wazuh is cross-platform, unlike OpenEDR)                  no agent) │
  └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Host swap (July 2026):** `scanner.home.arpa` and `ansible.home.arpa` traded
+> physical hosts — OpenVAS moved Minimox → Bigmox (it outgrew Minimox's smaller
+> RAM pool once real scan load exceeded its original 4 GB), and Ansible moved
+> Bigmox → Minimox to free up the room OpenVAS needed. IPs and DNS names are
+> unchanged either way (`vmbr0`/VLAN 40 exists on both hosts) — only the `(Host)`
+> label in the diagram above changed. See Phase 4's "Why This Moved" note for the
+> full RAM math.
 
 > **Endpoint OS correction (see Troubleshooting Log — Current-Stack Issue 2):** The
 > laptop was originally assumed Windows and routed toward Sysmon. It's actually
 > running Fedora Linux — confirmed via Splunk's `hostname` field reporting `fedora`.
-> It now belongs on the Auditd path, and OpenEDR's Windows-only agent doesn't apply
-> to it. Desktop's OS was never independently confirmed either — don't assume
+> It now belongs on the Auditd path. Unlike OpenEDR (Windows-only), Wazuh's agent
+> supports Linux too, so the laptop is no longer excluded from the EDR track —
+> see Phase 3. Desktop's OS was never independently confirmed either — don't assume
 > Windows there without checking first.
 
 > **Firewall note on traffic direction**
-> Splunk UF and OpenEDR agents always INITIATE toward their backend — the backend
+> Splunk UF and Wazuh agents always INITIATE toward their backend — the backend
 > never reaches out to endpoints. Ansible is the one exception: it initiates OUT to
 > endpoints (SSH/WinRM) to run playbooks, which is exactly why it needs its own
 > explicit allow rules rather than relying on the passive agent-initiated model the
@@ -233,7 +262,8 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
       - `scanner.home.arpa` → `10.40.40.14`
       - `ansible.home.arpa` → `10.40.40.15`
       - `soar.home.arpa` → `10.40.40.16` (add when SOAR VM is built)
-      - `openedr.home.arpa` → `10.40.40.13` (unchanged, already exists)
+      - `wazuh-edr.home.arpa` → `10.40.40.13` (renamed from `openedr.home.arpa`,
+        July 2026 — see Phase 3; remove the old record once nothing references it)
       - Double-check all records after saving with `nslookup <name>.home.arpa`
         from the desktop (not from the VM itself — see Issue 12 in network doc)
 
@@ -243,12 +273,17 @@ soar.home.arpa        | 10.40.40.16   | 40   | Bigmox   | Splunk SOAR CE — pla
       - **Open item:** the new stack's target spec for this VM is 4 vCPU / 8 GB / 100 GB. The disk bump (50 GB → 100 GB) is the one change worth actually doing given Splunk's own index storage needs — plan a disk resize during the repurposing pass.
       - Fully uninstall Wazuh first (see Troubleshooting Log — Wazuh section, now deprecated/historical) before installing Splunk to avoid port/service conflicts.
 
-- [x] **Create OpenVAS VM on Minimox** (`scanner.home.arpa`)
+- [x] **Create OpenVAS VM on Minimox** (`scanner.home.arpa`) — ⚠️ **moved to Bigmox,
+      July 2026**, rebuilt at 8 GB RAM after Minimox proved too tight once real
+      scan load exceeded 4 GB; see Phase 4's "Why This Moved" note for the full
+      RAM math.
       - OS: Ubuntu 22.04 LTS
       - Resources: 4 vCPU, 8 GB RAM, 100 GB disk (Greenbone's own minimum is 4 GB RAM / 20 GB disk for scanner + feed data — sized up for headroom)
       - Network bridge: `vmbr0` (VLAN 40)
 
-- [x] **Create Ansible + Semaphore VM on Bigmox** (`ansible.home.arpa`)
+- [x] **Create Ansible + Semaphore VM on Bigmox** (`ansible.home.arpa`) — ⚠️ **moved
+      to Minimox, July 2026**, swapped with OpenVAS to free Bigmox's RAM for the
+      heavier scanner workload; see Phase 4's "Why This Moved" note.
       - OS: Ubuntu 24.04 LTS
       - Resources: 2 vCPU, 2 GB RAM, 20 GB disk (Semaphore's own guidance: 2 GB RAM / 2 CPU cores minimum)
       - Network bridge: `vmbr0` (VLAN 40)
@@ -261,7 +296,7 @@ ip a show ens18    # or eth0/ens3 depending on Proxmox NIC naming
 - [x] **Confirm hostnames resolve from the desktop before moving to Phase 1**
       ```
       nslookup splunk.home.arpa
-      nslookup openedr.home.arpa
+      nslookup wazuh-edr.home.arpa
       nslookup scanner.home.arpa
       nslookup ansible.home.arpa
       ```
@@ -326,7 +361,9 @@ sudo /opt/splunk/bin/splunk enable boot-start
         expected source)
       - `linux-audit` — **50 GB** (Auditd from Pi, Bigmox host, Minimox host,
         Laptop)
-      - `openedr-events` — **40 GB** (bridged from OpenEDR via HEC — Phase 8)
+      - `wazuh-alerts` — **40 GB** *(renamed from `openedr-events`, July 2026 — see
+        Phase 3's EDR pivot; fed by a Splunk UF on the Wazuh VM tailing
+        `alerts.json`, not HEC)*
       - `openvas-scans` — **25 GB** (bridged from OpenVAS results — Phase 4/8;
         lowest volume — periodic scan snapshots, not continuous telemetry)
 
@@ -344,7 +381,7 @@ sudo /opt/splunk/bin/splunk enable boot-start
       Actual per-source input configuration (Sysmon channel, Auditd file monitor)
       is covered in Phase 2.
 
-- [ ] Verify data is flowing once Phase 2 inputs are configured:
+- [x] Verify data is flowing once Phase 2 inputs are configured:
 ```spl
 index="windows-events"
 index="linux-audit"
@@ -451,13 +488,13 @@ index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 
 ### Linux — Auditd (Pi, Bigmox host, Minimox host, Laptop — Fedora)
 
-- [ ] Install and enable auditd:
+- [x] Install and enable auditd:
 ```bash
 sudo apt install -y auditd audispd-plugins
 sudo systemctl enable --now auditd
 ```
 
-- [ ] Set `log_format=ENRICHED` in `/etc/audit/auditd.conf` (best practice for
+- [x] Set `log_format=ENRICHED` in `/etc/audit/auditd.conf` (best practice for
       Splunk CIM field mapping), and change `log_group` from `root` to a group the
       Splunk UF user can read (commonly a dedicated `splunk` group) so the UF
       doesn't need to run as root just to read `/var/log/audit/audit.log`.
@@ -529,147 +566,325 @@ index="linux-audit"
 
 ---
 
-## Phase 3 — OpenEDR (Self-Hosted, Docker)
+## Phase 3 — Wazuh (Manager + Agent Only — EDR Role, Not SIEM)
 
-**Goal:** OpenEDR backend running via Docker on the OpenEDR VM; Windows agent
-installed on Desktop and Laptop; endpoint telemetry (process trees, file events,
-network connections) visible in the OpenEDR frontend. Kept as the dedicated EDR
-console/process-tree track — this is unchanged from the original plan, it was
-never dependent on Wazuh.
-**Estimated time:** 5–8 hours (budget the most slack here — most moving parts)
-**VM:** `openedr.home.arpa` (10.40.40.13, on Minimox)
+**Goal:** Wazuh manager running standalone (no indexer, no dashboard) on a freshly
+rebuilt VM; Wazuh agents on Desktop and Laptop connected and confirmed `Active`;
+alerts flowing into a new Splunk index via Universal Forwarder. Splunk remains the
+only dashboard/query surface — Wazuh's own indexer and dashboard packages are
+deliberately never installed. This phase is installs only — FIM watch paths and the
+active-response auto-block rule that make the agents actually do file integrity
+monitoring, rootkit detection, and active response are deliberately **not**
+configured here; that's Phase 5's job, done as an Ansible playbook instead of
+one-off SSH edits.
+**Estimated time:** 3–5 hours
+**VM:** `wazuh-edr.home.arpa` (10.40.40.13, on Minimox — rebuilt fresh from the old
+OpenEDR VM, July 2026)
 
-### What OpenEDR Is and Why It's Kept Separate from Splunk
+### Why This Is Wazuh Again, and Why That's Not a Contradiction
 
-Splunk is alert/log-driven; OpenEDR is event-driven telemetry at a lower level —
-every process creation, file open, registry write, and network connection is
-recorded as a base event. The value is in the raw process tree/behavioral view,
-which is a distinct, resume-relevant skill from SPL-based SIEM work.
+This slot went through three attempts before landing here — worth understanding why,
+since it's easy to look at "Wazuh" in this doc twice and assume the SIEM decision got
+reversed. It didn't.
 
-```
-Two separate projects exist — know which one you're using:
+**Attempt 1 — jymcheong/OpenEDR ("Free EDR").** Originally chosen for lower friction.
+Turned out to be an abandoned fork — last real activity around 2021, renamed
+specifically to distance itself from Comodo's project. This is what caused nearly
+every Current-Stack Issue in the Troubleshooting Log below: no real Windows service
+(it ran via scheduled tasks that silently deregistered themselves), a homebrew
+SFTP-based upload mechanism, and the trust-policy/`evm.local.src` saga. Fully
+uninstalled — see the Troubleshooting Log for the uninstall sequence, including the
+1603 MSI errors hit along the way.
 
-1. ComodoSecurity/openedr (GitHub)
-   - Backend: ELK stack (Elasticsearch + Logstash + Kibana) via Docker
-   - Agent: Windows MSI (signed by Comodo Security Solutions)
-   - Repo: https://github.com/ComodoSecurity/openedr
+**Attempt 2 — ComodoSecurity/openedr (the "real" OpenEDR).** jymcheong's fork was
+renamed *specifically* to avoid confusion with this project, so it seemed like the
+obvious next move. Its own getting-started docs turned out to be a stub: no shipped
+`docker-compose.yml` (just a pointer to "clone a pre-prepared ELK package" with no
+link), a two-line Docker install doc, and — critically — no official Filebeat module
+for its own telemetry format, meaning self-hosting it means hand-writing Logstash/
+Filebeat parsers against undocumented output. The project's own README says as much:
+its "Quick Start" section tells users to sign up for the paid Comodo Dragon Enterprise
+cloud platform instead, describing self-hosting as "only a short-term solution until
+all the easy-to-use packages for OpenEDR is finalized." Never actually built.
 
-2. jymcheong/OpenEDR ("Free EDR" fork)
-   - Backend: docker-compose script, SFTP receiver + OrientDB + web frontend
-   - Install: single curl command + shell script
-   - Repo: https://github.com/jymcheong/OpenEDR
-```
+**Attempt 3 (current) — Wazuh, manager + agent only.** Research into what free,
+self-hosted tools real organizations actually run turned up Wazuh as the one with
+verifiable production adoption (30M+ downloads/year, ~16,000 GitHub stars, a 2026
+Cybersecurity Stars Award, documented use by MSSPs and mid-market SOCs specifically
+because it's free) — as opposed to the vendor "best of" listicles that kept ranking
+OpenEDR first despite what its own docs actually contained.
 
-> **Recommendation:** Start with jymcheong/OpenEDR for lower friction, try the
-> ComodoSecurity/ELK path afterward for the ELK experience.
+The apparent contradiction: didn't we drop Wazuh already? Yes — the *full* Wazuh
+stack (manager + wazuh-indexer/OpenSearch + wazuh-dashboard/Kibana-fork) was dropped
+as the primary SIEM, specifically because SPL is more interview-relevant than Wazuh's
+query language. That decision stands. What's running now is manager + agent only —
+no indexer, no dashboard, no Wazuh UI you'd ever log into. Splunk's Universal
+Forwarder tails the manager's local alerts file into Splunk exactly the way it
+already tails Sysmon's and Auditd's output — Wazuh is a detection/response *source*
+here, not a competing SIEM. The thing Splunk's UF can't do on its own — file
+integrity monitoring, rootkit detection, and genuine active response (killing a
+process, blocking an IP, quarantining a file) — is exactly the gap OpenEDR was
+supposed to fill and couldn't.
 
-### Checklist — jymcheong/OpenEDR (Recommended First)
+One real capability upgrade out of this: Wazuh's agent is cross-platform. OpenEDR
+was Windows-only, which is why the Fedora laptop was excluded from the EDR track
+this whole time (see the endpoint OS note above). Wazuh covers both Desktop and
+Laptop.
 
-**Backend Setup (on OpenEDR VM)**
+### Checklist
 
-- [x] SSH into the OpenEDR VM, install Docker + Docker Compose (standard
-      Docker CE install for Ubuntu, official apt-repo method — not the
-      convenience script):
+**Step 1 — Rebuild the VM fresh**
+
+- [x] Destroy the old OpenEDR VM on Minimox (Docker/jymcheong remnants already torn
+      down per the Troubleshooting Log) and create a new VM sized for a manager-only
+      workload — no indexer means no OpenSearch-scale resource needs:
+      - OS: Ubuntu 22.04 LTS
+      - Resources: **2 vCPU, 4 GB RAM, 100 GB disk** (deliberately lighter than the
+        old 4 vCPU/8 GB — Minimox is RAM-tight per Server-VM-Specs.md once the
+        planned FreeIPA + demo-apps IAM VMs land there; this frees 4 GB back into
+        that budget). Disk left at 100 GB since Minimox has ample free disk and
+        shrinking a virtual disk safely is a needless risk for a resource that isn't
+        actually scarce here.
+      - Network bridge: `vmbr0` (VLAN 40)
+
+- [x] Rename the DNS record `openedr.home.arpa` → `wazuh-edr.home.arpa` at
+      `10.40.40.13` (done in Phase 0's checklist — confirm it actually took with
+      `nslookup wazuh-edr.home.arpa` from the desktop).
+
+**Step 2 — Install Wazuh manager only (no indexer, no dashboard)**
+
+- [x] Add the Wazuh package repo:
 ```bash
-# Remove any old/conflicting packages first
-for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-  sudo apt-get remove -y $pkg
-done
-
-# Add Docker's official apt repository
+curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+sudo chmod 644 /usr/share/keyrings/wazuh.gpg
+echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | sudo tee -a /etc/apt/sources.list.d/wazuh.list
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-
-# Install Docker Engine, CLI, containerd, and the Compose v2 plugin
-# (docker-compose-plugin gives you `docker compose ...` — the syntax used
-# throughout this build, e.g. Phase 4's `docker compose up -d`)
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# Optional: run docker without sudo
-sudo usermod -aG docker $USER
-newgrp docker
-
-# Verify
-sudo systemctl status docker
-docker compose version
-sudo docker run hello-world
 ```
-
-- [x] Run the OpenEDR install script:
+> **Gotcha hit during the actual install:** `sudo` has to sit on the `gpg` side of the
+> pipe specifically, not on `curl` — `curl` just reads the key over the network (no
+> permission issue), but `gpg --import` is what writes into `/usr/share/keyrings/`,
+> a root-owned directory. Missing `sudo` there fails silently-ish (a `Permission
+> denied` from gpg, easy to miss), the keyring file never gets created, and
+> `apt-get update` then reports `NO_PUBKEY` and refuses to index the repo — which is
+> why `wazuh-manager` shows as "Unable to locate package" even though the repo line
+> itself was added successfully.
+- [x] Install **only** the manager package — do not install `wazuh-indexer` or
+      `wazuh-dashboard`:
 ```bash
-curl -L https://github.com/jymcheong/OpenEDR/tarball/master | tar xz \
-&& mv jym* openEDR && cd openEDR && ./install.sh
+sudo apt-get install -y wazuh-manager
+sudo systemctl daemon-reload
+sudo systemctl enable wazuh-manager
+sudo systemctl start wazuh-manager
+sudo systemctl status wazuh-manager
 ```
-      Prompts for SFTP IP and Frontend IP — use `10.40.40.13` for both.
+> **Skip the Filebeat-to-indexer step entirely.** Wazuh's official install guide
+> normally has you configure Filebeat here to ship data to the indexer. Since
+> there's no indexer in this build, skip that section completely — the manager
+> writes alerts to `/var/ossec/logs/alerts/alerts.json` on its own regardless,
+> which is the file Splunk reads directly in Step 4.
 
-- [x] Verify containers: `docker ps` (OrientDB, SFTP receiver, web frontend)
+**Step 3 — Install agents (Desktop + Laptop)**
 
-- [x] Access the web frontend at `http://openedr.home.arpa:8080`,
-      OrientDB console at `http://openedr.home.arpa:2480`
+> **FIM + active-response config deliberately deferred — see Phase 5.** An earlier
+> draft of this step had you hand-edit the manager's config directly over SSH: create
+> a `windows` agent group with Windows-specific FIM paths, and replace the
+> commented-out `<active-response>` placeholder in `ossec.conf` with a real
+> auto-block-on-SSH-failure rule. One piece of that was actually applied — the
+> `windows` group's `agent.conf` got created on disk — before deciding this
+> shouldn't be a manual, untracked SSH session at all. Cleaning that up now so
+> Phase 5's Ansible playbook starts from nothing rather than fighting a file it
+> doesn't know about:
+```bash
+sudo rm -rf /var/ossec/etc/shared/windows
+```
+> `ossec.conf` itself was never actually edited — the active-response placeholder
+> was only backed up, never replaced — so there's nothing to revert there. The
+> `/var/ossec/etc/ossec.conf.bak` backup can stay; it's harmless.
 
-**Windows Agent Setup (Desktop only — pending OS confirmation)**
+- [x] **Desktop (Windows)** — confirm real OS first per the standing note in this doc, then:
+```powershell
+msiexec.exe /i wazuh-agent.msi /q WAZUH_MANAGER="10.40.40.13" WAZUH_REGISTRATION_SERVER="10.40.40.13"
+NET START WazuhSvc
+```
 
-> The laptop is confirmed Fedora Linux (Troubleshooting Log — Current-Stack Issue 2),
-> so it's out of scope for this section entirely — the jymcheong/OpenEDR and
-> ComodoSecurity agents covered in this doc are Windows-only. Desktop's OS still
-> needs confirming before running this section against it either.
+- [x] **Laptop (Fedora)**:
+```bash
+sudo rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
+sudo tee /etc/yum.repos.d/wazuh.repo > /dev/null <<EOF
+[wazuh]
+gpgcheck=1
+gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
+enabled=1
+name=EL-\$releasever - Wazuh
+baseurl=https://packages.wazuh.com/4.x/yum/
+priority=1
+EOF
+sudo WAZUH_MANAGER="10.40.40.13" dnf install -y wazuh-agent
+sudo systemctl daemon-reload
+sudo systemctl enable wazuh-agent
+sudo systemctl start wazuh-agent
+```
 
-- [x] Download the OpenEDR Windows agent MSI:
-      https://github.com/ComodoSecurity/openedr/releases (latest: v2.5.1.0,
-      tag `release-2.5.1` — grab the `.msi` from Assets), install with the
-      backend IP:
-      ```
-      msiexec /i OpenEdrAgent.msi EDRSVRADDRESS=10.40.40.13
-      ```
+- [x] Confirm both agents show `Active` on the manager:
+```bash
+sudo /var/ossec/bin/agent_control -l
+```
 
-- [ ] Verify telemetry in the OrientDB console/web UI within 2–3 minutes. If
-      nothing appears, check Windows Firewall isn't blocking outbound, and that
-      the backend's SFTP port (22) is actually mapped by Docker.
+**Step 4 — Splunk UF on the Wazuh VM, tailing alerts.json**
+
+- [x] Retire the `openedr-events` index (Settings → Indexes) and create `wazuh-alerts` in its place at the same **40 GB** allocation — reuses the existing 190 GB shared volume budget from Phase 1 rather than adding a new index on top of it. There's no OpenEDR historical data worth preserving.
+
+- [x] Install Splunk UF on `wazuh-edr.home.arpa` (same as every other endpoint), point at `splunk.home.arpa:9997`.
+
+- [x] Configure the monitor stanza —
+      `/opt/splunkforwarder/etc/system/local/inputs.conf`:
+```ini
+[monitor:///var/ossec/logs/alerts/alerts.json]
+disabled = 0
+host = wazuh-edr.home.arpa
+index = wazuh-alerts
+sourcetype = wazuh-alerts
+```
+
+- [x] Configure JSON parsing —
+      `/opt/splunkforwarder/etc/system/local/props.conf`:
+```ini
+[wazuh-alerts]
+DATETIME_CONFIG =
+INDEXED_EXTRACTIONS = json
+KV_MODE = none
+NO_BINARY_CHECK = true
+category = Application
+disabled = false
+pulldown_type = true
+```
+
+- [x] Restart the UF and verify in Splunk:
+```spl
+index="wazuh-alerts"
+```
+
+### Key Ports
+
+```
+Port  | Protocol | Direction                    | Purpose
+------|----------|-------------------------------|--------------------------------
+1514  | UDP      | Agent → Manager               | Event data
+1515  | TCP      | Agent → Manager               | Agent enrollment/registration
+9997  | TCP      | UF (on Wazuh VM) → Splunk     | Forwarder receiving port (existing rule)
+```
+> No new firewall rule appears necessary — Desktop/Laptop (VLAN 1) initiating to the
+> Wazuh VM (VLAN 40) follows the same direction as existing Splunk UF/Sysmon traffic,
+> which already works under the current zone policy. Confirm once agents are
+> installed rather than assuming.
 
 ### Sources
-- ComodoSecurity/openedr: https://github.com/ComodoSecurity/openedr
-- jymcheong/OpenEDR: https://github.com/jymcheong/OpenEDR
-- Docker install documentation: https://docs.docker.com/engine/install/ubuntu/
+- Wazuh installation guide — server step by step: https://documentation.wazuh.com/current/installation-guide/wazuh-server/step-by-step.html
+- Wazuh agent — Windows package install: https://documentation.wazuh.com/current/installation-guide/wazuh-agent/wazuh-agent-package-windows.html
+- Wazuh agent — Linux package install: https://documentation.wazuh.com/current/installation-guide/wazuh-agent/wazuh-agent-package-linux.html
+- Wazuh active response documentation: https://documentation.wazuh.com/current/user-manual/capabilities/active-response/how-to-configure.html
+- Wazuh Splunk integration guide: https://documentation.wazuh.com/current/integrations-guide/splunk/index.html
+- ComodoSecurity/openedr (evaluated, not used): https://github.com/ComodoSecurity/openedr
+- jymcheong/OpenEDR (evaluated, not used — see Troubleshooting Log for uninstall): https://github.com/jymcheong/OpenEDR
 
 ---
 
 ## Phase 4 — OpenVAS / Greenbone (Vulnerability Scanning)
 
 **Goal:** Greenbone Community Edition (OpenVAS) running on its own VM, feed data loaded, and a first authenticated/unauthenticated scan run against the homelab's own IP ranges — including devices with no agent (switch, IoT, consoles).
-**Estimated time:** 3–5 hours (feed sync on first run can take a while)
-**VM:** `scanner.home.arpa` (10.40.40.14, on Minimox)
+**Estimated time:** 4–6 hours (rebuild + feed sync from scratch on first run can take a while)
+**VM:** `scanner.home.arpa` (10.40.40.14, rebuilt fresh on **Bigmox**, moved from Minimox,
+July 2026)
 
 ### Why This Tool
 
-Vulnerability management is a distinct, JD-common skill from both SIEM and EDR work, and it's the one tool in this stack that needs no endpoint agent — it covers every IP on the network, including the Netgear switch, IoT devices, and game consoles that can't run a Splunk UF or OpenEDR agent. This also sets up the scan → attack → detect → remediate → re-scan loop planned for VLAN 50 (Cyber Lab) once that's built.
+Vulnerability management is a distinct, JD-common skill from both SIEM and EDR work, and it's the one tool in this stack that needs no endpoint agent — it covers every IP on the network, including the Netgear switch, IoT devices, and game consoles that can't run a Splunk UF or Wazuh agent. This also sets up the scan → attack → detect → remediate → re-scan loop planned for VLAN 50 (Cyber Lab) once that's built.
+
+### Why This Moved From Minimox to Bigmox
+
+Originally built on Minimox at 8 GB RAM (Greenbone's own documented minimum), but
+the real VM was only ever actually configured at 4 GB — and even that wasn't
+enough; it was running out of RAM mid-scan. Fixing that by just raising Minimox's
+allocation doesn't work: Minimox is a 15.34 GiB host that's also carrying the
+Wazuh EDR manager (4 GB) plus two still-unbuilt IAM VMs (FreeIPA + demo-apps, 4 GB
+each planned). Even at OpenVAS's bare 8 GB minimum, that's 20 GB configured against
+15.34 GiB physical before those IAM VMs are even built — and OpenVAS realistically
+wants more than 8 GB once it's scanning multiple VLANs concurrently.
+
+Dropping jymcheong/OpenEDR (8 GB) for Wazuh manager-only (4 GB) did free 4 GB back
+into Minimox's budget, but that room was already earmarked for the FreeIPA/
+demo-apps landing, not for absorbing a scanner that's already outgrowing its
+original allocation. Bigmox has the physical headroom instead (31.29 GiB), and
+Ansible + Semaphore — light at 2 GB — moves to Minimox in its place, which is
+where the freed-up OpenEDR room actually gets used. See `Homelab-Server-VM-Specs.md`
+for the full RAM math on both hosts.
+
+**Sizing the rebuild:** starting at Greenbone's own documented minimum, **8 GB**
+RAM / 4 vCPU (up from the 4 GB that proved insufficient) — not jumping straight to
+12 GB, since Bigmox still needs to absorb Splunk SOAR (8 GB, planned) and Keycloak
+(4 GB, planned) later, and there's a pending, still-undone trim of Splunk's own
+footprint from its actual 16 GB down to its documented 8 GB target. That trim
+should happen before OpenVAS gets pushed past 8 GB — it's what actually creates
+the room. Re-pull real Proxmox usage after this rebuild and a full scan cycle
+before deciding whether 8 GB genuinely holds or needs to go to 10–12 GB.
 
 ### Checklist
 
-- [ ] Install Docker + Docker Compose on the OpenVAS VM — same commands as
-      Phase 3's OpenEDR VM setup above (official Docker CE apt-repo install).
+- [ ] **Destroy the old `scanner.home.arpa` VM on Minimox** (data isn't worth
+      preserving — Greenbone's own feed will just re-sync fresh) and create a new
+      VM on **Bigmox**:
+      - OS: Ubuntu 22.04 LTS
+      - Resources: **4 vCPU, 8 GB RAM, 100 GB disk** (RAM raised from the 4 GB
+        that proved insufficient; disk unchanged, still plenty for feed + scan
+        data)
+      - Network bridge: `vmbr0` (VLAN 40) — same bridge/VLAN as Minimox, so
+        `scanner.home.arpa` keeps the same IP, `10.40.40.14`; no DNS change
+        needed.
 
-- [ ] Pull Greenbone's official Community Container compose file. **Verified
-      July 2026** — the file was renamed from `docker-compose.yml` to
-      `compose.yaml` upstream; the old filename no longer exists at this path
-      (the doc's previous command was also just broken — the URL had gotten
-      split across lines):
+- [ ] Update the DHCP reservation for `scanner.home.arpa` in
+      `Homelab-Network-Documentation.md` — the new VM has a new virtual NIC (new
+      MAC address), so the existing MAC-based reservation for `10.40.40.14` needs
+      to point at the new VM's MAC, not the old one.
+
+- [ ] Confirm DNS still resolves correctly post-rebuild:
+```bash
+nslookup scanner.home.arpa
+```
+
+- [ ] Install Docker + Docker Compose on the OpenVAS VM (official Docker CE
+      apt-repo install — Phase 3 no longer uses Docker now that it's Wazuh's
+      native packages instead of the old jymcheong Docker stack):
+```bash
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+  sudo apt-get remove -y $pkg
+done
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+sudo systemctl status docker
+docker compose version
+```
+
+- [ ] Pull Greenbone's official Community Container compose file. **Verified July 2026** — the file was renamed from `docker-compose.yml` to `compose.yaml` upstream; the old filename no longer exists at this path (the doc's previous command was also just broken — the URL had gotten split across lines):
 ```bash
 mkdir -p ~/openvas && cd ~/openvas
 curl -f -L https://greenbone.github.io/docs/latest/_static/compose.yaml -o compose.yaml
 ```
       **Before starting it**, fix the default port bindings. The official
       compose file binds the `nginx` service (TLS termination + the GSA web
-      UI) to `127.0.0.1` only — same loopback-only gotcha already hit with
-      OpenEDR in Phase 3. Left as-is, `https://scanner.home.arpa` will not be
+      UI) to `127.0.0.1` only — the same loopback-only gotcha that showed up
+      repeatedly with the old jymcheong OpenEDR containers before that stack
+      was decommissioned. Left as-is, `https://scanner.home.arpa` will not be
       reachable from any other machine on the network:
 ```bash
 sed -i 's/127.0.0.1:443:443/443:443/; s/127.0.0.1:9392:9392/9392:9392/' compose.yaml
@@ -679,8 +894,7 @@ sed -i 's/127.0.0.1:443:443/443:443/; s/127.0.0.1:9392:9392/9392:9392/' compose.
 docker compose up -d
 ```
 
-- [ ] Wait for the vulnerability feed to fully sync on first start (this can take
-      a while — check container logs for feed-sync completion before scanning):
+- [ ] Wait for the vulnerability feed to fully sync on first start (this can take a while — check container logs for feed-sync completion before scanning):
 ```bash
 docker compose logs -f gvmd
 ```
@@ -704,31 +918,105 @@ docker compose logs gvmd | grep -i "user\|password"
       10.99.99.0/24   (Management)
       ```
 
-- [ ] Run a first unauthenticated scan against VLAN 40 (your own SOC VMs) as a
-      safe first test, then expand to other VLANs once you understand the scan
-      duration/impact on live devices (avoid running heavy scans against
-      always-on IoT/gaming devices during hours you're using them).
+- [ ] Run a first unauthenticated scan against VLAN 40 (your own SOC VMs) as a safe first test, then expand to other VLANs once you understand the scan duration/impact on live devices (avoid running heavy scans against always-on IoT/gaming devices during hours you're using them).
 
 - [ ] Review results in GSA — CVSS-scored findings per host, exportable reports.
 
 ### Sources
 - Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/container/index.html
 - OpenVAS/GVM install walkthrough: https://serverspace.io/support/help/how-to-install-and-use-openvas-gvm-on-ubuntu/
+- Greenbone Community Edition system requirements discussion (RAM sizing): https://forum.greenbone.net/t/openvas-system-requirments/1636
 
 ---
 
 ## Phase 5 — Ansible + Semaphore (Automation Layer)
 
 **Goal:** Semaphore's web UI running on top of Ansible, with a working inventory
-covering the homelab's Linux and Windows endpoints, and at least one real playbook
-run against each OS type. This is the execution layer that Splunk SOAR will call
-into once that's built.
-**Estimated time:** 3–4 hours
-**VM:** `ansible.home.arpa` (10.40.40.15, on Bigmox)
+covering the homelab's Linux and Windows endpoints, and the Wazuh manager's FIM
+(`windows` group `agent.conf`) and active-response (`ossec.conf`) config applied
+via a real playbook instead of by hand over SSH. This is the execution layer that
+Splunk SOAR will call into once that's built.
+**Estimated time:** 4–5 hours
+**VM:** `ansible.home.arpa` (10.40.40.15, moved to **Minimox** July 2026 — Bigmox
+needed the RAM headroom for OpenVAS instead; see Phase 4's "Why This Moved" note)
 
 ### Why This Tool
 
 Config management/automation is its own job track (Security Automation Engineer, DevSecOps), and Ansible + a UI on top of it (Semaphore) is directly relevant there. It's also the actual "do something" half of detect → respond — Splunk can tell you something's wrong, but Ansible is what actually executes a fix.
+
+### First Real Target — Wazuh Manager Config
+
+Phase 3 deliberately stopped at manager + agent installs and left the Wazuh
+manager's own config alone. That config — the `windows` agent group's FIM paths
+and the SSH-brute-force active-response rule — is this playbook's actual first
+job, for two reasons: it's a real change against a real box (not a throwaway
+fact-gathering run), and it fixes the actual problem with doing it by hand — no
+record of what changed, no easy revert, no way to re-apply cleanly after a VM
+rebuild.
+
+Two pieces of config, two different Ansible modules, because they're structurally
+different edits:
+
+- **`windows` group's `agent.conf`** — this file doesn't exist until Ansible
+  creates it, so it's a straight file drop: `ansible.builtin.template` (or
+  `copy`, since there's no templating needed yet — every value is static) writing
+  the full file to `/var/ossec/etc/shared/windows/agent.conf` on
+  `wazuh-edr.home.arpa`.
+
+- **`ossec.conf`'s active-response block** — this file already exists with real
+  content around the spot being edited, so a full-file overwrite is wrong here.
+  `ansible.builtin.blockinfile`, marked with its own begin/end comment markers,
+  inserted after the last `<command>` block and before `<!-- Log analysis -->`.
+  Idempotent by design — reruns don't duplicate the block, and it's easy to see
+  in a diff exactly what Ansible owns versus what shipped with the package.
+
+Both need a handler that restarts `wazuh-manager` only when the file actually
+changed (`notify:` on each task, `listen: wazuh-manager` restart handler) —
+active-response and FIM group changes aren't hot-reloaded.
+
+Rough shape:
+```yaml
+# inventory: wazuh group
+[wazuh]
+wazuh-edr.home.arpa
+
+# playbook
+- hosts: wazuh
+  become: true
+  tasks:
+    - name: Deploy windows FIM group config
+      ansible.builtin.copy:
+        src: files/windows-agent.conf
+        dest: /var/ossec/etc/shared/windows/agent.conf
+        owner: wazuh
+        group: wazuh
+        mode: "0644"
+      notify: Restart wazuh-manager
+
+    - name: Enable SSH brute-force active-response
+      ansible.builtin.blockinfile:
+        path: /var/ossec/etc/ossec.conf
+        marker: "<!-- {mark} ANSIBLE MANAGED BLOCK: active-response -->"
+        insertafter: '</command>'
+        block: |
+          <active-response>
+            <disabled>no</disabled>
+            <command>firewall-drop</command>
+            <location>local</location>
+            <rules_id>5712</rules_id>
+            <timeout>600</timeout>
+          </active-response>
+      notify: Restart wazuh-manager
+
+  handlers:
+    - name: Restart wazuh-manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+```
+The `5712` rule ID still isn't independently verified against the installed
+ruleset — check `grep -r 'id="5712"' /var/ossec/ruleset/rules/` on the manager
+before trusting it, same caveat as when this was first drafted in Phase 3.
 
 ### Checklist
 
@@ -755,30 +1043,52 @@ sudo apt update && sudo apt install -y ansible
       more fiddly half — WinRM needs to be explicitly enabled and configured for
       Ansible's `winrm` connection plugin; budget extra time here).
 
-- [ ] Build a basic inventory in Semaphore covering all endpoints, grouped by OS.
+- [ ] Build a basic inventory in Semaphore covering all endpoints, grouped by OS,
+      including a `wazuh` group containing just `wazuh-edr.home.arpa`.
 
-- [ ] Run a first real playbook against each OS type — start with something
-      read-only/low-risk (e.g., a fact-gathering or patch-check playbook) before
-      trusting it with anything that changes state.
+- [ ] Run a first read-only playbook against each OS type (e.g., a fact-gathering
+      or patch-check playbook) to confirm SSH/WinRM connectivity actually works
+      before trusting Ansible with anything that changes state.
+
+- [ ] Write and run the Wazuh config playbook from the "First Real Target" section
+      above — deploy the `windows` group's `agent.conf` via `copy`, add the
+      active-response block via `blockinfile`, restart `wazuh-manager` via the
+      handler.
+
+- [ ] Verify on `wazuh-edr.home.arpa` that both pieces landed correctly:
+```bash
+cat /var/ossec/etc/shared/windows/agent.conf
+grep -A6 'ANSIBLE MANAGED BLOCK' /var/ossec/etc/ossec.conf
+sudo systemctl status wazuh-manager
+```
+
+- [ ] Re-run the same playbook a second time and confirm Ansible reports the
+      tasks as unchanged (not re-applied) — this is the actual point of doing it
+      this way instead of by hand: idempotent, safe to rerun after a VM rebuild.
 
 ### Sources
 - Semaphore UI installation guide: https://semaphoreui.com/docs/admin-guide/installation
 - Semaphore install walkthrough (Ubuntu/Debian): https://computingforgeeks.com/install-semaphore-ubuntu-debian/
 - Ansible documentation: https://docs.ansible.com/
+- `ansible.builtin.blockinfile` module docs: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/blockinfile_module.html
+- `ansible.builtin.copy` module docs: https://docs.ansible.com/ansible/latest/collections/ansible/builtin/copy_module.html
 
 ---
 
 ## Phase 6 — Validation
 
 **Goal:** Generate real (simulated) attack activity and confirm it surfaces across
-Splunk, OpenEDR, and OpenVAS — document what each tool caught vs. missed. This is
-the actual cybersecurity practice payoff.
+Splunk and OpenVAS, with Wazuh's FIM/active-response contributing where relevant —
+document what each tool caught vs. missed. This is the actual cybersecurity practice
+payoff.
 **Estimated time:** 2–3 hours
 **Hosts:** Desktop/Laptop (attack source) + test VM (target)
 
 ### Why a Test VM, Not Your Daily Driver
 
-Spin up a small Ubuntu or Kali VM on Bigmox or Minimox, enroll it with Splunk UF + OpenEDR agent (Linux agent if available, otherwise Windows-only coverage for OpenEDR), and use it as the victim machine.
+Spin up a small Ubuntu or Kali VM on Bigmox or Minimox, enroll it with Splunk UF + a
+Wazuh agent — cross-platform, unlike OpenEDR, so this works the same whether the test
+VM ends up Linux or Windows — and use it as the victim machine.
 
 ### Tests to Run
 
@@ -806,7 +1116,7 @@ Expected: Visible in an OpenVAS scan of the target if run around the same time; 
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("whoami"))
 powershell -encodedCommand $encoded
 ```
-Expected: Sysmon Event ID 1 (process creation) with the encoded command line visible in Splunk; OpenEDR process tree shows the same invocation. Only valid once Desktop's OS is actually confirmed Windows.
+Expected: Sysmon Event ID 1 (process creation) with the encoded command line visible in Splunk. Wazuh's coverage here is narrower than OpenEDR's process-tree view would have been — this test isn't a strong FIM/active-response trigger unless the command happens to touch a watched path, so Wazuh's real contribution to detection engineering in this build is closer to Tests 1–2 (FIM, active response) than to general process visibility, which Sysmon already owns. Only valid once Desktop's OS is actually confirmed Windows.
 
 **Test 4b — Suspicious Process Execution (Laptop, Fedora/Auditd equivalent)**
 ```bash
@@ -819,7 +1129,7 @@ Expected: The `exec_commands` auditd rule from Phase 2 fires (execve syscall wat
 - [ ] Test 1 (EICAR): file-create event visible in Splunk
 - [ ] Test 2 (Brute-force): failed logons visible in Splunk `linux-audit`; custom SPL detection built and saved
 - [ ] Test 3 (Nmap): scan visible in OpenVAS results; detection attempted in Splunk
-- [ ] Test 4 (PowerShell, Desktop): Sysmon event visible in Splunk; process tree visible in OpenEDR — pending Desktop OS confirmation
+- [ ] Test 4 (PowerShell, Desktop): Sysmon event visible in Splunk — pending Desktop OS confirmation (Wazuh's coverage here is narrower than OpenEDR's was, see Test 4 note)
 - [ ] Test 4b (Laptop/Auditd): exec_commands event visible in Splunk `linux-audit`
 - [ ] Document what each tool caught vs. missed in the Troubleshooting Log below
 
@@ -846,10 +1156,10 @@ Expected: The `exec_commands` auditd rule from Phase 2 fires (execve syscall wat
 
 - [ ] **Verify all DNS records are correct and consistent**
       ```
-      nslookup splunk.home.arpa   → 10.40.40.12
-      nslookup openedr.home.arpa  → 10.40.40.13
-      nslookup scanner.home.arpa  → 10.40.40.14
-      nslookup ansible.home.arpa  → 10.40.40.15
+      nslookup splunk.home.arpa      → 10.40.40.12
+      nslookup wazuh-edr.home.arpa   → 10.40.40.13
+      nslookup scanner.home.arpa     → 10.40.40.14
+      nslookup ansible.home.arpa     → 10.40.40.15
       ```
 
 - [ ] **Plan VLAN 50 (Cyber Lab) zone assignment** — per the network doc roadmap, create a dedicated zone (not Internal) with narrow allow rules only for monitoring/scanning traffic back to `splunk.home.arpa` and `scanner.home.arpa`.
@@ -860,48 +1170,59 @@ Expected: The `exec_commands` auditd rule from Phase 2 fires (execve syscall wat
 
 ## Phase 8 — Unified Dashboard & SOAR (Capstone)
 
-**Goal:** One Splunk view correlating Splunk-native telemetry (Sysmon/Auditd), OpenEDR (bridged via HEC), and OpenVAS (bridged via HEC) — the primary demo screen for the YouTube series / recruiter walkthrough. Then, once built, Splunk SOAR completes the pipeline: SIEM detects → SOAR orchestrates → Ansible executes.
-**Estimated time:** 4–6 hours for the dashboard bridge script; SOAR itself is a separate future build, not yet started.
-**VM:** Bridge script runs on the OpenEDR VM; dashboard built in Splunk
+**Goal:** One Splunk view correlating Splunk-native telemetry (Sysmon/Auditd), Wazuh
+EDR alerts, and OpenVAS (bridged via HEC) — the primary demo screen for the YouTube
+series / recruiter walkthrough. Then, once built, Splunk SOAR completes the pipeline:
+SIEM detects → SOAR orchestrates → Ansible executes.
+**Estimated time:** 2–4 hours for the dashboard + bridge script (lighter than
+originally scoped — Wazuh needed no bridge script, only OpenVAS does now). SOAR
+itself is a separate future build, not yet started.
+**VM:** Bridge script runs on the OpenVAS VM; dashboard built in Splunk
 (`splunk.home.arpa:8000`); SOAR (future) on `soar.home.arpa`
 
-### Why OpenEDR and OpenVAS Need a Bridge Script
+### Why Only OpenVAS Needs a Bridge Script
 
-Neither OpenEDR (data sits in OrientDB behind an SFTP receiver) nor OpenVAS (results live in its own scan-report database) writes a flat file Splunk's UF can just tail. Both need a small script that queries the source directly and pushes events into Splunk over its HTTP Event Collector (HEC, port 8088).
+OpenVAS's results live in its own scan-report database with no flat file Splunk's UF
+can tail, so it still needs a small script that queries the source directly and
+pushes events into Splunk over its HTTP Event Collector (HEC, port 8088). Wazuh
+needs no equivalent bridge — its manager already writes `alerts.json` to disk, and
+the Splunk UF configured in Phase 3 tails it directly into `index=wazuh-alerts`,
+the same pattern Sysmon and Auditd already use. This is one of the concrete
+advantages of the Wazuh pivot over OpenEDR: one less moving part in this phase.
 
 ### Checklist
 
 **Enable Splunk HEC**
 
-- [ ] Splunk Web → Settings → Data Inputs → HTTP Event Collector → New Token (one for `openedr-hec`, one for `openvas-hec`)
+- [ ] Splunk Web → Settings → Data Inputs → HTTP Event Collector → New Token
+      (`openvas-hec`)
 - [ ] Global Settings → set to **Enabled**
-- [ ] Confirm `openedr-events` and `openvas-scans` indexes exist
+- [ ] Confirm the `openvas-scans` index exists
 - [ ] Verify HEC is reachable:
 ```bash
 curl -k https://splunk.home.arpa:8088/services/collector/health \
 -H "Authorization: Splunk <token>"
 ```
 
-**Build the Bridge Scripts**
+**Build the Bridge Script**
 
-- [ ] OrientDB → Splunk: Python script on the OpenEDR VM, polling OrientDB's REST
-      API (`http://openedr.home.arpa:2480/query/<db>/sql/<query>`) for events newer
-      than a locally tracked "last seen" ID/timestamp, POSTing batches to
-      `https://splunk.home.arpa:8088/services/collector/event`.
-- [ ] OpenVAS → Splunk: similar pattern against the Greenbone/GVM API (GMP —
-      Greenbone Management Protocol) to pull completed scan results and push them
-      as HEC events.
-- [ ] Schedule both on a cron/systemd timer (every 60 seconds is reasonable to
+- [ ] OpenVAS → Splunk: Python script on the OpenVAS VM against the Greenbone/GVM
+      API (GMP — Greenbone Management Protocol) to pull completed scan results and
+      push them as HEC events to `https://splunk.home.arpa:8088/services/collector/event`.
+- [ ] Schedule it on a cron/systemd timer (every 60 seconds is reasonable to
       start).
 
 **Verify and Build the Dashboard**
 
-- [ ] Confirm events landing: `index="openedr-events"`, `index="openvas-scans"`
+- [ ] Confirm events landing: `index="wazuh-alerts"` (already flowing since Phase 3,
+      no bridge needed), `index="openvas-scans"` (via the bridge script above)
 - [ ] In Splunk Dashboard Studio, build one unified dashboard with panels for
-      Windows/Sysmon events, Linux/Auditd events, OpenEDR telemetry, and OpenVAS
+      Windows/Sysmon events, Linux/Auditd events, Wazuh EDR alerts, and OpenVAS
       findings — plus a correlated view joining across sources on hostname/IP.
 - [ ] Re-run the Phase 6 PowerShell encoded-command test and confirm it shows up
-      on the unified dashboard without opening OpenEDR's UI separately.
+      on the unified dashboard without needing a separate console for any source —
+      the whole point of dropping OpenEDR's standalone UI in favor of Wazuh
+      forwarding straight into Splunk.
 
 **Splunk SOAR (Future — Not Yet Built)**
 
@@ -939,89 +1260,142 @@ curl -k https://splunk.home.arpa:8088/services/collector/health \
 
 ## Command Reference (This Build)
 
+Broken out by program, command + what it actually does, for lookup rather than
+reading top to bottom. Multi-step workflows (persisting audit rules, tracing a
+missing-data search) stay as ordered code blocks since sequence matters there.
+
+### Splunk (indexer/search head — `splunk.home.arpa`)
+
+| Command | What it does |
+|---|---|
+| `sudo /opt/splunk/bin/splunk start` | Start the indexer/search head |
+| `sudo /opt/splunk/bin/splunk stop` | Stop it |
+| `sudo /opt/splunk/bin/splunk restart` | Restart — needed after most server-side config changes |
+| `sudo /opt/splunk/bin/splunk status` | Confirm it's actually running |
+
+### Splunk Universal Forwarder (any endpoint)
+
+| Command | What it does |
+|---|---|
+| `sudo /opt/splunkforwarder/bin/splunk start` | Start the UF |
+| `sudo /opt/splunkforwarder/bin/splunk restart` | Restart — needed after editing `inputs.conf`/`outputs.conf` |
+| `sudo /opt/splunkforwarder/bin/splunk status` | Confirm the UF is running |
+| `sudo tail -f /opt/splunkforwarder/var/log/splunk/splunkd.log` | Live UF log — first place to look when data isn't arriving |
+| `sudo /opt/splunkforwarder/bin/splunk list monitor` | List every file/path this UF is currently watching |
+| `sudo /opt/splunkforwarder/bin/splunk list forward-server` | Confirm the UF actually has an active receiving indexer configured |
+| `sudo /opt/splunkforwarder/bin/splunk add forward-server splunk.home.arpa:9997 -auth admin:<password>` | Point this UF at the indexer — **not automatic**, has to be run explicitly on every new UF install (the actual cause of the "no results" issue on the Wazuh VM) |
+| `sudo /opt/splunkforwarder/bin/splunk btool inputs list --debug` | Show every `inputs.conf` stanza actually loaded, and which file it came from |
+| `sudo /opt/splunkforwarder/bin/splunk ftr` | Fixes `SPLUNK_HOME` ownership if you see that warning on start |
+
+`inputs.conf` locations (create if missing, restart the UF after editing):
+- Linux: `/opt/splunkforwarder/etc/system/local/inputs.conf`
+- Windows: `C:\Program Files\SplunkUniversalForwarder\etc\system\local\inputs.conf`
+
+**Windows UF (PowerShell)** — same commands, different binary path:
+
+| Command | What it does |
+|---|---|
+| `& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' list forward-server` | Confirm the UF is actively connected to the indexer |
+| `& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' btool inputs list --debug` | Confirm a given `inputs.conf` stanza is actually loading, and from where |
+| `Get-Content 'C:\Program Files\SplunkUniversalForwarder\var\log\splunk\splunkd.log' -Tail 200 \| Select-String -Pattern 'Sysmon'` | Search the UF's own log for a specific channel/input's errors |
+
+### Auditd (Linux endpoints)
+
+| Command | What it does |
+|---|---|
+| `sudo systemctl status auditd` | Confirm the daemon is running |
+| `sudo auditctl -l` | List active rules |
+| `sudo tail -f /var/log/audit/audit.log` | Live audit log |
+
+Persisting custom rules (live `auditctl` commands don't survive a reboot):
 ```bash
-# ── SPLUNK ─────────────────────────────────────────────────────────
-sudo /opt/splunk/bin/splunk start
-sudo /opt/splunk/bin/splunk stop
-sudo /opt/splunk/bin/splunk restart
-sudo /opt/splunk/bin/splunk status
-
-# Splunk Universal Forwarder (on any endpoint)
-sudo /opt/splunkforwarder/bin/splunk start
-sudo /opt/splunkforwarder/bin/splunk restart
-sudo /opt/splunkforwarder/bin/splunk status
-sudo tail -f /opt/splunkforwarder/var/log/splunk/splunkd.log
-sudo /opt/splunkforwarder/bin/splunk list monitor
-sudo /opt/splunkforwarder/bin/splunk list forward-server
-sudo /opt/splunkforwarder/bin/splunk btool inputs list --debug
-sudo /opt/splunkforwarder/bin/splunk ftr     # fixes SPLUNK_HOME ownership if you see that warning
-
-# inputs.conf locations (create if missing, restart UF after editing):
-#   Linux:   /opt/splunkforwarder/etc/system/local/inputs.conf
-#   Windows: C:\Program Files\SplunkUniversalForwarder\etc\system\local\inputs.conf
-
-
-# ── AUDITD (Linux endpoints) ───────────────────────────────────────
-sudo systemctl status auditd
-sudo auditctl -l                      # list active rules
-sudo tail -f /var/log/audit/audit.log
-
-# Persist custom rules (live auditctl commands don't survive a reboot):
 sudo nano /etc/audit/rules.d/homelab.rules   # rule syntax, no auditctl/sudo prefix
 sudo augenrules --load
-sudo auditctl -l                      # confirm rules loaded
+sudo auditctl -l                             # confirm rules loaded
+```
 
+### Sysmon (Windows endpoints)
 
-# ── SYSMON (Windows endpoints) ─────────────────────────────────────
-Get-Service Sysmon64
-sysmon64.exe -c                       # print current config
+| Command | What it does |
+|---|---|
+| `Get-Service Sysmon64` | Confirm the service is running |
+| `sysmon64.exe -c` | Print the currently loaded config |
 
+### Docker (OpenVAS VM)
 
-# ── DOCKER (OpenEDR / OpenVAS VMs) ──────────────────────────────────
-docker ps
-docker logs -f <container_name>
-docker compose restart
-docker compose down
-docker compose up -d
+| Command | What it does |
+|---|---|
+| `docker ps` | List running containers |
+| `docker logs -f <container_name>` | Follow a container's logs |
+| `docker compose restart` | Restart the stack in place |
+| `docker compose down` | Tear the stack down (keeps volumes) |
+| `docker compose up -d` | Bring the stack back up, detached |
 
+### Wazuh (manager: `wazuh-edr.home.arpa`; agents: Desktop, Laptop)
 
-# ── ANSIBLE / SEMAPHORE ─────────────────────────────────────────────
-sudo systemctl status semaphore
-ansible all -m ping -i inventory.ini
-ansible-playbook -i inventory.ini playbook.yml
+| Command | What it does |
+|---|---|
+| `sudo systemctl status wazuh-manager` | Confirm the manager is running |
+| `sudo systemctl restart wazuh-manager` | Restart — required after any config change, nothing here hot-reloads |
+| `sudo /var/ossec/bin/agent_control -l` | List connected agents and their status (`Active` / `Never connected` / etc.) |
+| `sudo tail -f /var/ossec/logs/ossec.log` | Manager log — scan-end messages, connection errors |
+| `sudo tail -f /var/ossec/logs/alerts/alerts.json` | Raw alerts, the same file Splunk's UF tails |
+| `sudo wc -l /var/ossec/logs/alerts/alerts.json` | Quick check for whether anything's landing in alerts at all |
 
+Windows agent (Desktop):
 
-# ── NETWORKING / GENERAL ───────────────────────────────────────────
-ip a show ens18
-nslookup splunk.home.arpa
-nslookup openedr.home.arpa
-nslookup scanner.home.arpa
-nslookup ansible.home.arpa
-sudo ss -tlnp
-sudo dhclient -r ens18 && sudo dhclient ens18
+| Command | What it does |
+|---|---|
+| `Get-Service WazuhSvc` | Confirm the agent service is running |
+| `Restart-Service WazuhSvc` | Required after any centralized syscheck/config change |
 
-sudo ss -tlnp | grep 9997    # Splunk receiving
-sudo ss -tlnp | grep 8000    # Splunk web
-sudo ss -tlnp | grep 8080    # OpenEDR web
-sudo ss -tlnp | grep 3000    # Semaphore web
+Linux agent (Laptop, Fedora):
 
+| Command | What it does |
+|---|---|
+| `sudo systemctl status wazuh-agent` | Confirm the agent is running |
+| `sudo systemctl restart wazuh-agent` | Restart after a config change |
 
-# ── DEBUGGING "INDEX HAS DATA BUT SEARCH SHOWS NOTHING" ────────────────
-# Find every actual source/sourcetype landing in an index for a given host —
-# use this instead of guessing at exact source= strings (see Current-Stack
-# Issue 5). Always set the time range picker to All Time first.
+### Ansible / Semaphore
+
+| Command | What it does |
+|---|---|
+| `sudo systemctl status semaphore` | Confirm the Semaphore web UI service is running |
+| `ansible all -m ping -i inventory.ini` | Confirm SSH/WinRM connectivity to every inventory host |
+| `ansible-playbook -i inventory.ini playbook.yml` | Run a playbook |
+
+### Networking / General
+
+| Command | What it does |
+|---|---|
+| `ip a show ens18` | Confirm the interface's actual IP |
+| `nslookup splunk.home.arpa` | Confirm DNS resolution |
+| `nslookup wazuh-edr.home.arpa` | Confirm DNS resolution |
+| `nslookup scanner.home.arpa` | Confirm DNS resolution |
+| `nslookup ansible.home.arpa` | Confirm DNS resolution |
+| `sudo ss -tlnp` | List all listening ports on this host |
+| `sudo dhclient -r ens18 && sudo dhclient ens18` | Release and renew DHCP on the interface |
+
+Port checks (`sudo ss -tlnp \| grep <port>`):
+
+| Port | What it's for |
+|---|---|
+| `9997` | Splunk receiving (indexer side) |
+| `8000` | Splunk web |
+| `1514` | Wazuh agent event data |
+| `1515` | Wazuh agent enrollment |
+| `3000` | Semaphore web |
+
+No web UI port to check for Wazuh itself — deliberately no dashboard installed (Phase 3).
+
+### Debugging "index has data but search shows nothing"
+
+Find every actual source/sourcetype landing in an index for a given host — use
+this instead of guessing at exact `source=` strings (see Current-Stack Issue 5).
+Always set the time range picker to **All Time** first:
+```spl
 index="windows-events" host="TDesktop*"
 | stats count by source, sourcetype
-
-# On the Windows endpoint (PowerShell) — confirm the UF is actually loading
-# a given inputs.conf stanza, and from which file:
-& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' btool inputs list --debug
-
-# Confirm the UF is actively connected to the indexer:
-& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' list forward-server
-
-# Search the UF's own log for a specific channel/input's errors (e.g. Sysmon):
-Get-Content 'C:\Program Files\SplunkUniversalForwarder\var\log\splunk\splunkd.log' -Tail 200 | Select-String -Pattern 'Sysmon'
 ```
 
 ---
@@ -1198,6 +1572,60 @@ index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 
 **Status:** Resolved.
 
+### Current-Stack Issue 6 — OpenEDR Windows agent (`edrsvc`) installed but service disabled, won't start
+**Symptom:** On TDesktop, double-clicking `OpenEdrAgent.msi` completed without obvious error, but the interactive installer likely never applied the `EDRSVRADDRESS=10.40.40.13` property (that's only reliably set via command-line `msiexec /i ... EDRSVRADDRESS=...`). Attempting to reinstall via command line initially failed with "the installation package could not be opened" — caused by running `msiexec` without the full path to the `.msi` file (it wasn't in the current directory). After locating the file in `Downloads` and using the full path, the reinstall completed, but `Get-Service edrsvc` showed `Stopped`, and `Start-Service edrsvc` failed with a generic, unhelpful error.
+
+**Cause:** `net start edrsvc` surfaced the real reason — Windows error 1058 ("the service cannot be started ... because it is disabled"). `sc.exe qc edrsvc` confirmed `START_TYPE: 4 DISABLED`. (Also corrected while investigating: the real install path is `C:\Program Files\COMODO\EdrAgentV2\`, not `C:\Program Files\OpenEdr\EdrAgentV2` as originally assumed from the vendor's general documentation.) Root cause of *why* it installed disabled wasn't fully confirmed — leading theory is the installer intentionally ships the service disabled until a valid server address is detected, which the GUI double-click install path likely never provided.
+
+**Fix:**
+```powershell
+sc.exe config edrsvc start= auto
+Start-Service edrsvc
+Get-Service edrsvc
+```
+(Note the required space after `start=` — `sc.exe` syntax quirk.)
+
+**Status:** Superseded by Current-Stack Issue 7 below. The service fix here worked (confirmed `edrsvc` stayed `Running`, and telemetry briefly confirmed flowing to the backend) — but a more serious problem showed up right after, which is why the agent ended up fully uninstalled again. Keeping this entry since the disabled-service fix itself is still valid/reusable if this agent goes on a different machine.
+
+### Current-Stack Issue 7 — OpenEDR Windows agent kills Electron apps (Obsidian, Claude Desktop/Cowork) on TDesktop
+**Symptom:** After the Issue 6 fix got `edrsvc` running and telemetry confirmed flowing from TDesktop to the OpenEDR backend, Electron-based apps — Obsidian, Claude Desktop (Cowork) — started getting killed instantly on launch. This blocked using Cowork itself on that machine, so this round of troubleshooting had to happen in a separate session.
+
+**Investigation path:**
+1. Confirmed `edrsvc` running and tamper-protected (`Stop-Service`/`net stop` both blocked by the agent itself).
+2. Checked the OpenEDR Wekan/OrientDB backend (Triage board) — real telemetry was confirmed flowing from TDesktop; the "Organisation" card needed moving from the Profiling list to the Detection list (Wekan is Kanban-based — swimlanes/lists/cards, not a traditional dashboard) to activate alerting.
+3. Hit an unrelated Wekan access issue — logged in as a different account than the one the installer seeded; fixed by adding the logged-in account as a board member directly via MongoDB rather than recovering the original seeded account.
+4. Standard removal failed: `msiexec /x {GUID}` → Error 1605 ("product not currently installed") — an MSI database inconsistency, likely because the actual working install method bypasses normal MSI registration (see Cause below).
+
+**Cause (confirmed):** The real, correct install path for this agent is **not** the raw `OpenEdrAgent.msi` from ComodoSecurity's GitHub releases — it's a PowerShell installer from a third repo, `jymcheong/openedrClient`, pointed at the backend's client-config port (`10.40.40.13:8888`, the same `clientconfighosting` container found while chasing Issue 6):
+```powershell
+[scriptblock]::Create((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/jymcheong/openedrClient/master/install.ps1')).Invoke()
+```
+This is genuinely the intended installer — `EdrAgentV2`/`edrsvc`/`edrdrv.sys` is not a mistaken or rogue install; jymcheong's OpenEDR project is built directly on Comodo's real, open-sourced EDR engine (kernel driver included), so the Comodo branding throughout (`C:\Program Files\COMODO\EdrAgentV2\`, "Comodo EDR Service") is expected. This same script also silently installs **Sysmon and NXLog** alongside the EDR agent.
+
+The actual problem: the agent's local policy file (`evm.local.src`) ships with an extremely narrow default trust allowlist —
+```
+knownTrustedPaths: git.exe, devenv.exe, cl.exe, msbuild.exe
+```
+— four developer tools, nothing else. With no management console connected to broaden this policy, the agent kills anything it doesn't recognize, which includes essentially all consumer Electron apps (Obsidian, Claude Desktop/Cowork, likely Discord/VS Code/Slack too).
+
+**Fix:** Removed via the project's own paired uninstaller (run elevated):
+```powershell
+[scriptblock]::Create((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/jymcheong/openedrClient/master/uninstall.ps1')).Invoke()
+```
+If it hangs, the project documents killing stuck processes and re-running with a `-u force` flag. Verify all three components installed alongside are actually gone, not just the EDR piece:
+```powershell
+Get-Service edrsvc -ErrorAction SilentlyContinue
+Get-ChildItem "C:\Program Files\COMODO\" -ErrorAction SilentlyContinue
+Get-Service Sysmon64 -ErrorAction SilentlyContinue
+```
+All three should return empty/not-found. Confirmed Obsidian and Claude Desktop/Cowork launch normally again after this.
+
+**Open decision — not yet made:** whether/how to run OpenEDR on TDesktop again.
+- **Option A:** Configure the Organisation board's actual policy settings on the backend to broaden the trust allowlist *before* redeploying to the desktop.
+- **Option B:** Don't run the OpenEDR client on the daily-driver desktop at all — reserve it for a dedicated, lower-stakes test/lab VM (this VM already exists as a concept — see Phase 6, "Why a Test VM, Not Your Daily Driver"), and rely on Sysmon + Auditd + Splunk (already the decided telemetry stack) for the desktop's actual day-to-day monitoring.
+
+**Status:** Uninstalled, TDesktop confirmed back to normal. Decision above still open — revisit before attempting to reinstall.
+
 *(Log new issues below this line as they come up, same Symptom/Cause/Fix format.)*
 
 ---
@@ -1228,7 +1656,8 @@ index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 
 **OpenEDR**
 - ComodoSecurity/openedr: https://github.com/ComodoSecurity/openedr
-- jymcheong/OpenEDR ("Free EDR" fork): https://github.com/jymcheong/OpenEDR
+- jymcheong/OpenEDR ("Free EDR" fork, backend): https://github.com/jymcheong/OpenEDR
+- jymcheong/openedrClient (Windows agent installer): https://github.com/jymcheong/openedrClient
 
 **OpenVAS / Greenbone**
 - Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/container/index.html

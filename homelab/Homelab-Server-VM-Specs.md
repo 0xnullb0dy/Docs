@@ -29,7 +29,7 @@
 | Boot Mode | EFI | EFI |
 | Proxmox Manager Version | pve-manager/9.2.2/b9984c6d90a4bd80 | pve-manager/9.0.3/025864202ebb6109 |
 | Storage backend note | ZFS pool `Storage` on a 2 TB `ST2000DX002` drive (replaced the original 1 TB drive July 10, 2026 after a damaged SATA connector pin — see SOC Build Plan Current-Stack Issue 4). Single-disk vdev; mirroring evaluated and ruled out as not possible on this hardware, scheduled scrub is the mitigation instead. | Not specified in source docs |
-| Hosts (VMs) | Splunk VM *(repurposed from Wazuh)*, Ansible+Semaphore VM, Splunk SOAR VM *(planned)*, Keycloak VM *(planned)* | OpenEDR VM, OpenVAS VM, FreeIPA VM *(planned)*, IAM demo-apps VM *(planned)* |
+| Hosts (VMs) | Splunk VM *(repurposed from Wazuh)*, OpenVAS VM *(moved from Minimox, July 2026 — see Update below)*, Splunk SOAR VM *(planned)*, Keycloak VM *(planned)* | Wazuh EDR VM *(rebuilt fresh from the OpenEDR VM, July 2026 — manager + agent only, no indexer/dashboard)*, Ansible+Semaphore VM *(moved from Bigmox, July 2026)*, FreeIPA VM *(planned)*, IAM demo-apps VM *(planned)* |
 
 ### Live Utilization Snapshot — July 5, 2026
 
@@ -72,6 +72,30 @@ making any sizing decision for new VMs.
 > plan — no host reassignment needed. Worth keeping an eye on Minimox's own 16 GB vs.
 > 15.34 GiB configured-RAM math once `idm` and `iam-apps` actually go live; may need to
 > trim one of their RAM allocations or rely on Proxmox memory ballooning.
+>
+> **Update (July 2026):** the OpenEDR VM's 8 GB allocation is gone — it was rebuilt as
+> the Wazuh EDR VM at 4 GB (manager-only, no indexer/dashboard needs far less than
+> Docker/OrientDB did). Minimox's configured-RAM total drops from 16 GB to 12 GB
+> against 15.34 GiB physical, which meaningfully de-risks the FreeIPA + demo-apps
+> landing mentioned above — re-run this math once those two VMs are actually built,
+> but the trim/ballooning concern is less urgent than it was.
+>
+> **Second update (July 2026) — OpenVAS/Ansible host swap:** OpenVAS turned out to
+> need more RAM than planned (outgrew its original 4 GB allocation mid-scan;
+> Greenbone's own docs recommend 8 GB minimum), and Minimox didn't have room for
+> that on top of Wazuh EDR plus the two still-planned IAM VMs. OpenVAS moved to
+> Bigmox; Ansible (only 2 GB) moved to Minimox in its place — see the SOC Build
+> Plan's Phase 4 "Why This Moved" note for the full math. Net effect: Minimox's
+> configured RAM is now Wazuh EDR (4 GB) + Ansible (2 GB) = 6 GB, plus the two
+> planned IAM VMs (8 GB) = 14 GB against 15.34 GiB physical — still fits, with less
+> margin than the OpenEDR→Wazuh trim alone would have given, since that freed room
+> effectively went to keeping the IAM VMs feasible rather than staying as pure
+> slack. Bigmox picks up the harder question: Splunk (actual 16 GB, target 8 GB) +
+> OpenVAS (8 GB) + Splunk SOAR (8 GB, planned) + Keycloak (4 GB, planned) only fits
+> inside 31.29 GiB if the long-deferred Splunk trim to 8 GB actually happens before
+> SOAR and Keycloak get built — worth re-checking the Keycloak-stays-on-Bigmox
+> decision above once that trim happens and OpenVAS's real post-rebuild usage is
+> known.
 
 ### Mini/Big Swap Reminder
 
@@ -89,9 +113,9 @@ All VMs currently documented, across both source files:
 | VM / Hostname | Host | Purpose | OS | vCPU | RAM | Disk | Storage Backend | Network / VLAN | IP |
 |---|---|---|---|---|---|---|---|---|---|
 | `splunk.home.arpa` *(repurposed from `wazuh.home.arpa`, then fully rebuilt July 10, 2026 after disk/RAM/BIOS issues — see SOC Build Plan Current-Stack Issue 4)* | Bigmox | Splunk Enterprise — primary SIEM | Ubuntu 24.04 LTS | 8 vCPU *(current — target is 4 vCPU, see note)* | 16 GB *(current — target is 8 GB)* | 250 GB | ZFS *(single-disk vdev on new `Storage` pool; mirroring ruled out as not possible on this hardware — see SOC Build Plan Current-Stack Issue 4)* | `vmbr0`, VLAN 40 | 10.40.40.12 |
-| `openedr.home.arpa` | Minimox | OpenEDR backend (Docker: OrientDB + SFTP receiver + web frontend, jymcheong fork) | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.13 |
-| `scanner.home.arpa` | Minimox | OpenVAS / Greenbone Community Edition — agentless vulnerability scanning across all VLANs | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.14 |
-| `ansible.home.arpa` | Bigmox | Ansible + Semaphore — config management / automation execution layer (future SOAR target) | Ubuntu 24.04 LTS | 2 vCPU | 2 GB | 20 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.15 |
+| `wazuh-edr.home.arpa` *(renamed from `openedr.home.arpa`, rebuilt fresh July 2026 — see SOC Build Plan Phase 3)* | Minimox | Wazuh manager + agent-only EDR — file integrity monitoring, rootkit detection, vulnerability detection, active response; no indexer/dashboard, alerts forwarded to Splunk via UF | Ubuntu 22.04 LTS | 2 vCPU | 4 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.13 |
+| `scanner.home.arpa` *(moved from Minimox, July 2026 — outgrew its RAM allocation)* | Bigmox | OpenVAS / Greenbone Community Edition — agentless vulnerability scanning across all VLANs | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.14 |
+| `ansible.home.arpa` *(moved from Bigmox, July 2026 — swapped with OpenVAS)* | Minimox | Ansible + Semaphore — config management / automation execution layer (future SOAR target); also the Wazuh manager config-as-code target (see SOC Build Plan Phase 5) | Ubuntu 24.04 LTS | 2 vCPU | 2 GB | 20 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.15 |
 | `soar.home.arpa` *(planned)* | Bigmox | Splunk SOAR On-premises Community Edition — orchestration layer, not yet built | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.16 |
 | Test/attack-target VM *(optional, recommended)* | Bigmox or Minimox | Splunk UF + OpenEDR-enrolled victim machine for Phase 6 validation testing (brute-force, EICAR, Nmap scans) — kept separate from daily-driver machines | Ubuntu or Kali (unspecified) | Not specified | Not specified | Not specified | Not specified | VLAN 40 (implied) | Not assigned |
 | `idm.home.arpa` *(planned)* | Minimox | FreeIPA identity backend (LDAP + Kerberos) for the IAM build | Rocky Linux 9 | 2 vCPU | 4 GB | 30 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.17 |
@@ -113,21 +137,36 @@ All VMs currently documented, across both source files:
 > above. Update each row from "planned" to built once the VM actually exists, and
 > confirm real specs match what was planned.
 
-> [!note] Wazuh dropped in favor of Splunk (July 6, 2026)
-> Wazuh was evaluated and fully removed from the stack — Splunk was kept instead
-> since it appears far more often on SOC analyst / security engineer job
-> descriptions and SPL is a directly testable interview skill. The VM at
-> `10.40.40.12` wasn't rebuilt, just repurposed: Wazuh packages removed, Splunk
-> Enterprise installed in their place. See `Homelab-SOC-Build-Plan.md`'s
-> Troubleshooting Log for the full (now-deprecated) Wazuh install saga, kept for
-> historical reference.
+> [!note] Wazuh dropped in favor of Splunk as SIEM (July 6, 2026)
+> The *full* Wazuh stack (manager + wazuh-indexer + wazuh-dashboard) was evaluated
+> and removed as the primary SIEM — Splunk was kept instead since it appears far more
+> often on SOC analyst / security engineer job descriptions and SPL is a directly
+> testable interview skill. The VM at `10.40.40.12` wasn't rebuilt, just repurposed:
+> Wazuh packages removed, Splunk Enterprise installed in their place. See
+> `Homelab-SOC-Build-Plan.md`'s Troubleshooting Log for the full (now-deprecated)
+> Wazuh install saga, kept for historical reference.
+>
+> **This is not contradicted by the Wazuh EDR VM below.** After two failed attempts
+> at an EDR tool (jymcheong/OpenEDR — abandoned fork; ComodoSecurity/openedr — no
+> real self-hosted docs, vendor pushes its paid cloud platform instead), Wazuh came
+> back into the stack in a deliberately narrow role: manager + agent only, at
+> `10.40.40.13`, with no indexer and no dashboard installed. It forwards alerts into
+> Splunk exactly like Sysmon/Auditd do — Splunk remains the only SIEM/dashboard in
+> the whole build. See SOC Build Plan Phase 3 for the full reasoning.
 
 > [!note] Why the SOC stack is split across two hosts
-> Splunk's indexer and OpenEDR's ELK-style backend are both meaningful resource
-> consumers — stacking everything on one Proxmox host risks starving both. Bigmox
-> (direct LAN 2 connection) carries Splunk + Ansible/Semaphore + the future SOAR
-> instance; Minimox carries OpenEDR + OpenVAS. One host going down doesn't take out
-> the entire monitoring/scanning capability at once.
+> Splunk's indexer is the heaviest resource consumer in this stack — stacking
+> everything on one Proxmox host risks starving it. Bigmox (direct LAN 2 connection,
+> 31.29 GiB RAM) carries Splunk + OpenVAS + the future SOAR instance; Minimox
+> (15.34 GiB RAM) carries the Wazuh EDR manager (deliberately light now that there's
+> no indexer/dashboard on it) + Ansible/Semaphore. One host going down doesn't take
+> out the entire monitoring/scanning capability at once.
+>
+> **Updated (July 2026):** OpenVAS and Ansible swapped hosts from the original
+> split — OpenVAS outgrew Minimox's smaller RAM pool once real scan load exceeded
+> its original 4 GB allocation, so it moved to Bigmox; Ansible (light at 2 GB)
+> moved to Minimox in its place. See the Decision callout above and SOC Build
+> Plan Phase 4 for the full math.
 
 > [!note] Splunk VM resource sizing — right-sizing pending
 > The VM's original 8 vCPU / 16 GB / 50 GB was sized for Wazuh's indexer + dashboard
@@ -167,4 +206,4 @@ sizing decisions.
 
 ---
 
-*Compiled July 2026 as a standing reference. Last updated: July 10, 2026 (Bigmox hardware fixes — new storage pool, RAM replaced, SVM enabled; see SOC Build Plan Current-Stack Issue 4). Update whenever a new VM is created or specs change on Bigmox/Minimox.*
+*Compiled July 2026 as a standing reference. Last updated: July 11, 2026 (OpenVAS ↔ Ansible host swap — `scanner.home.arpa` moved Minimox → Bigmox after outgrowing its RAM allocation, `ansible.home.arpa` moved Bigmox → Minimox in its place; see SOC Build Plan Phase 4). Previously updated: July 10, 2026 (Bigmox hardware fixes — new storage pool, RAM replaced, SVM enabled; see SOC Build Plan Current-Stack Issue 4). Update whenever a new VM is created or specs change on Bigmox/Minimox.*
