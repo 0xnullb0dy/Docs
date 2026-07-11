@@ -268,7 +268,7 @@ ip a show ens18    # or eth0/ens3 depending on Proxmox NIC naming
 
 ### Sources
 - Proxmox VM creation: https://pve.proxmox.com/wiki/Qemu/KVM_Virtual_Machines
-- Greenbone Community Edition system requirements: https://greenbone.github.io/docs/latest/22.4/container/index.html
+- Greenbone Community Edition system requirements: https://greenbone.github.io/docs/latest/container/index.html
 - Semaphore UI installation guide: https://semaphoreui.com/docs/admin-guide/installation
 
 ---
@@ -515,7 +515,7 @@ sudo /opt/splunkforwarder/bin/splunk restart
 sudo /opt/splunkforwarder/bin/splunk btool inputs list --debug
 ```
 
-- [ ] Verify in Splunk:
+- [x] Verify in Splunk:
 ```spl
 index="linux-audit"
 ```
@@ -567,19 +567,53 @@ Two separate projects exist — know which one you're using:
 
 **Backend Setup (on OpenEDR VM)**
 
-- [ ] SSH into the OpenEDR VM, install Docker + Docker Compose (standard
-      Docker CE install for Ubuntu).
+- [x] SSH into the OpenEDR VM, install Docker + Docker Compose (standard
+      Docker CE install for Ubuntu, official apt-repo method — not the
+      convenience script):
+```bash
+# Remove any old/conflicting packages first
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+  sudo apt-get remove -y $pkg
+done
 
-- [ ] Run the OpenEDR install script:
+# Add Docker's official apt repository
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+
+# Install Docker Engine, CLI, containerd, and the Compose v2 plugin
+# (docker-compose-plugin gives you `docker compose ...` — the syntax used
+# throughout this build, e.g. Phase 4's `docker compose up -d`)
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Optional: run docker without sudo
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verify
+sudo systemctl status docker
+docker compose version
+sudo docker run hello-world
+```
+
+- [x] Run the OpenEDR install script:
 ```bash
 curl -L https://github.com/jymcheong/OpenEDR/tarball/master | tar xz \
 && mv jym* openEDR && cd openEDR && ./install.sh
 ```
       Prompts for SFTP IP and Frontend IP — use `10.40.40.13` for both.
 
-- [ ] Verify containers: `docker ps` (OrientDB, SFTP receiver, web frontend)
+- [x] Verify containers: `docker ps` (OrientDB, SFTP receiver, web frontend)
 
-- [ ] Access the web frontend at `http://openedr.home.arpa:8080`,
+- [x] Access the web frontend at `http://openedr.home.arpa:8080`,
       OrientDB console at `http://openedr.home.arpa:2480`
 
 **Windows Agent Setup (Desktop only — pending OS confirmation)**
@@ -589,8 +623,10 @@ curl -L https://github.com/jymcheong/OpenEDR/tarball/master | tar xz \
 > ComodoSecurity agents covered in this doc are Windows-only. Desktop's OS still
 > needs confirming before running this section against it either.
 
-- [ ] Download the OpenEDR Windows agent MSI (ComodoSecurity GitHub releases),
-      install with the backend IP:
+- [x] Download the OpenEDR Windows agent MSI:
+      https://github.com/ComodoSecurity/openedr/releases (latest: v2.5.1.0,
+      tag `release-2.5.1` — grab the `.msi` from Assets), install with the
+      backend IP:
       ```
       msiexec /i OpenEdrAgent.msi EDRSVRADDRESS=10.40.40.13
       ```
@@ -618,23 +654,46 @@ Vulnerability management is a distinct, JD-common skill from both SIEM and EDR w
 
 ### Checklist
 
-- [ ] Install Docker + Docker Compose on the OpenVAS VM.
+- [ ] Install Docker + Docker Compose on the OpenVAS VM — same commands as
+      Phase 3's OpenEDR VM setup above (official Docker CE apt-repo install).
 
-- [ ] Pull Greenbone's official Community Containers compose file:
+- [ ] Pull Greenbone's official Community Container compose file. **Verified
+      July 2026** — the file was renamed from `docker-compose.yml` to
+      `compose.yaml` upstream; the old filename no longer exists at this path
+      (the doc's previous command was also just broken — the URL had gotten
+      split across lines):
 ```bash
-mkdir openvas && cd openvas
-curl -f -L https://greenbone.github.io/docs/latest/_static/docker
-compose-22.4.yml \
--o docker-compose.yml
+mkdir -p ~/openvas && cd ~/openvas
+curl -f -L https://greenbone.github.io/docs/latest/_static/compose.yaml -o compose.yaml
+```
+      **Before starting it**, fix the default port bindings. The official
+      compose file binds the `nginx` service (TLS termination + the GSA web
+      UI) to `127.0.0.1` only — same loopback-only gotcha already hit with
+      OpenEDR in Phase 3. Left as-is, `https://scanner.home.arpa` will not be
+      reachable from any other machine on the network:
+```bash
+sed -i 's/127.0.0.1:443:443/443:443/; s/127.0.0.1:9392:9392/9392:9392/' compose.yaml
+```
+      Then start it:
+```bash
 docker compose up -d
 ```
 
 - [ ] Wait for the vulnerability feed to fully sync on first start (this can take
-      a while — check container logs for feed-sync completion before scanning).
+      a while — check container logs for feed-sync completion before scanning):
+```bash
+docker compose logs -f gvmd
+```
 
 - [ ] Access the Greenbone Security Assistant (GSA) web UI at
-      `https://scanner.home.arpa` (default self-signed cert — accept the browser
-      warning), log in with the credentials generated during setup.
+      `https://scanner.home.arpa` (self-signed cert auto-generated by the
+      `gvm-config`/`nginx` containers on first start — accept the browser
+      warning). **Modern Greenbone containers no longer ship a fixed
+      `admin`/`admin` default** — an initial admin password is auto-generated
+      on first startup. Find it with:
+```bash
+docker compose logs gvmd | grep -i "user\|password"
+```
 
 - [ ] Create a scan target covering the homelab's active subnets:
       ```
@@ -653,7 +712,7 @@ docker compose up -d
 - [ ] Review results in GSA — CVSS-scored findings per host, exportable reports.
 
 ### Sources
-- Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/22.4/container/index.html
+- Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/container/index.html
 - OpenVAS/GVM install walkthrough: https://serverspace.io/support/help/how-to-install-and-use-openvas-gvm-on-ubuntu/
 
 ---
@@ -1172,7 +1231,7 @@ index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 - jymcheong/OpenEDR ("Free EDR" fork): https://github.com/jymcheong/OpenEDR
 
 **OpenVAS / Greenbone**
-- Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/22.4/container/index.html
+- Greenbone Community Containers documentation: https://greenbone.github.io/docs/latest/container/index.html
 - OpenVAS/GVM install walkthrough: https://serverspace.io/support/help/how-to-install-and-use-openvas-gvm-on-ubuntu/
 
 **Ansible + Semaphore**
