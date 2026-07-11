@@ -318,11 +318,22 @@ sudo /opt/splunk/bin/splunk enable boot-start
 
 - [x] Splunk Web → Settings → Forwarding and Receiving → Receive Data → Add New
       → port `9997` → Save
-- [x] Create indexes (Settings → Indexes → New Index):
-      - `windows-events` (Sysmon + Windows Security/System/Application logs)
-      - `linux-audit` (Auditd from Pi, Bigmox host, Minimox host)
-      - `openedr-events` (bridged from OpenEDR via HEC — Phase 8)
-      - `openvas-scans` (bridged from OpenVAS results — Phase 4/8)
+- [x] Create indexes (Settings → Indexes → New Index), sized against the 190 GB
+      shared volume cap noted in Server-VM-Specs.md (250 GB disk, ~220 GB usable
+      after OS/app/minFreeSpace reservations):
+      - `windows-events` — **75 GB** (Sysmon + Windows Security/System/Application
+        logs; sized largest — Sysmon process-creation volume is the heaviest
+        expected source)
+      - `linux-audit` — **50 GB** (Auditd from Pi, Bigmox host, Minimox host,
+        Laptop)
+      - `openedr-events` — **40 GB** (bridged from OpenEDR via HEC — Phase 8)
+      - `openvas-scans` — **25 GB** (bridged from OpenVAS results — Phase 4/8;
+        lowest volume — periodic scan snapshots, not continuous telemetry)
+
+      Set via the **Max Size (MB)** field in the New Index dialog, or
+      `maxTotalDataSizeMB` directly in `indexes.conf`: `76800` / `51200` /
+      `40960` / `25600` respectively (75/50/40/25 GB × 1024).
+
       Indexes must exist before a forwarder/script writes to them — writes to a
       non-existent index fail silently.
 
@@ -414,7 +425,7 @@ below) · Pi, Bigmox host, Minimox host, Laptop (Fedora Linux) — Linux/Auditd 
         ```
       - Confirm it's running: `Get-Service Sysmon64`
 
-- [ ] Configure the Splunk UF's `inputs.conf` to collect the Sysmon operational
+- [x] Configure the Splunk UF's `inputs.conf` to collect the Sysmon operational
       log:
 ```ini
 [WinEventLog://Microsoft-Windows-Sysmon/Operational]
@@ -433,7 +444,7 @@ Restart the UF service after editing.
 ```
       
 
-- [ ] Verify in Splunk:
+- [x] Verify in Splunk:
 ```spl
 index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
 ```
@@ -451,24 +462,58 @@ sudo systemctl enable --now auditd
       Splunk UF user can read (commonly a dedicated `splunk` group) so the UF
       doesn't need to run as root just to read `/var/log/audit/audit.log`.
 
-- [ ] Add watch rules for security-relevant paths/syscalls (adjust to taste —
-      start narrow, expand as you learn what's noisy):
+- [x] Add watch rules for security-relevant paths/syscalls, **persisted** (not
+      just live `auditctl`, which doesn't survive a reboot). Create a dedicated
+      file — keeps custom rules separate from the distro's stock
+      `/etc/audit/rules.d/audit.rules` — and write rule syntax directly (no
+      `auditctl`/`sudo` prefix inside the file itself):
 ```bash
-sudo auditctl -w /etc/passwd -p wa -k passwd_changes
-sudo auditctl -w /etc/shadow -p wa -k shadow_changes
-sudo auditctl -w /etc/sudoers -p wa -k sudoers_changes
-sudo auditctl -a always,exit -F arch=b64 -S execve -k exec_commands
+sudo nano /etc/audit/rules.d/homelab.rules
 ```
-      Persist these in `/etc/audit/rules.d/` so they survive a reboot.
+```
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-w /etc/sudoers -p wa -k sudoers_changes
+-a always,exit -F arch=b64 -S execve -k exec_commands
+```
+      Load without a reboot, then verify:
+```bash
+sudo augenrules --load
+sudo auditctl -l
+```
+      `auditctl -l` should list all four rules. Two things you'll see during
+      `augenrules --load` that are **benign, not errors**: `Old style watch
+      rules are slower` (expected — `-w` syntax is just less efficient
+      in-kernel than an equivalent syscall-based `-a` rule, still works fine),
+      and on some systems (e.g. Raspberry Pi OS) a repeated `auditctl -s`
+      status dump — the field that actually matters there is `lost 0`
+      (zero audit events dropped); `failure 1` is a config label (failure
+      mode = log to kernel log), not an actual failure count.
+      **Status: done on Laptop (Fedora) and Pi — Bigmox host and Minimox host
+      still pending.**
 
-- [ ] Configure the Splunk UF's `inputs.conf`:
+- [x] Configure the Splunk UF's `inputs.conf` — on Linux this lives at:
+```
+/opt/splunkforwarder/etc/system/local/inputs.conf
+```
 ```ini
 [monitor:///var/log/audit/audit.log]
 index = linux-audit
 sourcetype = linux:audit
 disabled = false
 ```
-      Restart the UF after editing.
+      Restart the UF after editing (requires root — this is also the command
+      to use if you ever see a `SPLUNK_HOME ownership`/`Operation not
+      permitted` warning, which just means Splunk detected files not owned by
+      its boot-start user; run `sudo /opt/splunkforwarder/bin/splunk ftr` once
+      to fix ownership, then commands run clean):
+```bash
+sudo /opt/splunkforwarder/bin/splunk restart
+```
+      Confirm the stanza actually loaded:
+```bash
+sudo /opt/splunkforwarder/bin/splunk btool inputs list --debug
+```
 
 - [ ] Verify in Splunk:
 ```spl
@@ -844,15 +889,28 @@ sudo /opt/splunk/bin/splunk status
 
 # Splunk Universal Forwarder (on any endpoint)
 sudo /opt/splunkforwarder/bin/splunk start
+sudo /opt/splunkforwarder/bin/splunk restart
 sudo /opt/splunkforwarder/bin/splunk status
 sudo tail -f /opt/splunkforwarder/var/log/splunk/splunkd.log
 sudo /opt/splunkforwarder/bin/splunk list monitor
+sudo /opt/splunkforwarder/bin/splunk list forward-server
+sudo /opt/splunkforwarder/bin/splunk btool inputs list --debug
+sudo /opt/splunkforwarder/bin/splunk ftr     # fixes SPLUNK_HOME ownership if you see that warning
+
+# inputs.conf locations (create if missing, restart UF after editing):
+#   Linux:   /opt/splunkforwarder/etc/system/local/inputs.conf
+#   Windows: C:\Program Files\SplunkUniversalForwarder\etc\system\local\inputs.conf
 
 
 # ── AUDITD (Linux endpoints) ───────────────────────────────────────
 sudo systemctl status auditd
 sudo auditctl -l                      # list active rules
 sudo tail -f /var/log/audit/audit.log
+
+# Persist custom rules (live auditctl commands don't survive a reboot):
+sudo nano /etc/audit/rules.d/homelab.rules   # rule syntax, no auditctl/sudo prefix
+sudo augenrules --load
+sudo auditctl -l                      # confirm rules loaded
 
 
 # ── SYSMON (Windows endpoints) ─────────────────────────────────────
@@ -887,6 +945,24 @@ sudo ss -tlnp | grep 9997    # Splunk receiving
 sudo ss -tlnp | grep 8000    # Splunk web
 sudo ss -tlnp | grep 8080    # OpenEDR web
 sudo ss -tlnp | grep 3000    # Semaphore web
+
+
+# ── DEBUGGING "INDEX HAS DATA BUT SEARCH SHOWS NOTHING" ────────────────
+# Find every actual source/sourcetype landing in an index for a given host —
+# use this instead of guessing at exact source= strings (see Current-Stack
+# Issue 5). Always set the time range picker to All Time first.
+index="windows-events" host="TDesktop*"
+| stats count by source, sourcetype
+
+# On the Windows endpoint (PowerShell) — confirm the UF is actually loading
+# a given inputs.conf stanza, and from which file:
+& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' btool inputs list --debug
+
+# Confirm the UF is actively connected to the indexer:
+& 'C:\Program Files\SplunkUniversalForwarder\bin\splunk.exe' list forward-server
+
+# Search the UF's own log for a specific channel/input's errors (e.g. Sysmon):
+Get-Content 'C:\Program Files\SplunkUniversalForwarder\var\log\splunk\splunkd.log' -Tail 200 | Select-String -Pattern 'Sysmon'
 ```
 
 ---
@@ -1018,6 +1094,50 @@ host=fedora earliest=-1h
 **Cross-reference:** This likely retroactively explains the `_metrics` index STMgr error (`unexpected rc=-105 from st_txn_put`) noted in Current-Stack Issue 3 above, which that entry explicitly flagged as "never proven as root cause; likely just another downstream symptom" — bad RAM is now a strong candidate for that symptom too. This does **not** change Issue 3's own root cause or fix (missing AVX exposure from the `kvm64` CPU type, fixed by switching to `host`) — that was independently confirmed via direct `/proc/cpuinfo` verification and remains valid; it's a separate, compounding problem on the same box, not an alternate explanation for it.
 
 **Status:** RAM swapped, SVM enabled, Splunk web UI confirmed loading. Not yet confirmed long-term stable — hold off on declaring the rebuild done until Splunk, then Ansible/Semaphore and SOAR, have run clean for a few days. A full multi-pass `memtest86` run on the replacement RAM is still worth doing for formal confirmation (a short run without errors is a good sign, not a guarantee).
+
+### Current-Stack Issue 5 — Sysmon events never reach `windows-events`, despite valid config (Security/System from the same input work fine)
+**Symptom:** After Phase 2 Sysmon setup on `TDesktop`, the build plan's verification search
+```spl
+index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+```
+returned no results, even with the time range set to All Time. A broad, unfiltered `index="windows-events"` search *did* return results, which initially looked like a plain search-syntax/time-range issue. The command that actually exposed the real problem:
+```spl
+index="windows-events" host="TDesktop*"
+| stats count by source, sourcetype
+```
+Output only showed `WinEventLog:Security` (4,671 events) and `WinEventLog:System` (577 events) — `WinEventLog:Microsoft-Windows-Sysmon/Operational` was completely absent. Confirms Sysmon events genuinely aren't being ingested; this was never a search-side problem.
+
+**Ruled out:**
+- Sysmon not running — `Get-Service Sysmon64` shows `Running`.
+- Sysmon not generating events — `Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 5` showed live Process Create events.
+- UF not connected — `splunk.exe list forward-server` shows `splunk.home.arpa:9997` as an active forward.
+- Bad `inputs.conf` — confirmed via `splunk.exe btool inputs list --debug`: `[WinEventLog://Microsoft-Windows-Sysmon/Operational]`, `disabled = false`, `index = windows-events`, loaded from `etc\system\local\inputs.conf` — same file, same pattern as the working Security/System stanzas.
+- Receiving/index config on the Splunk side — port 9997 confirmed listening, `windows-events` index confirmed to exist and actively receive data (just not from Sysmon).
+
+**Cause (confirmed):** `splunkd.log` on TDesktop showed the real error:
+```
+WinEventLogChannel::subscribeToEvtChannel: Could not subscribe to Windows Event Log channel
+'Microsoft-Windows-Sysmon/Operational'
+WinEventLogChannel::init: Init failed, unable to subscribe ... errorCode=5
+```
+`errorCode=5` is Windows' `ERROR_ACCESS_DENIED`. Checked what account the UF service actually runs as:
+```powershell
+Get-CimInstance Win32_Service -Filter "Name='SplunkForwarder'" | Select-Object Name, StartName
+```
+→ `NT SERVICE\SplunkForwarder` — a Windows **virtual service account** (the modern Splunk UF installer's default, not Local System and not a real user). Security/System channels include the generic "SERVICE" well-known group in their default ACLs, so any service — including a virtual service account — can read them. Sysmon's installer (`sysmon64.exe -i`) sets a narrower channel ACL (SYSTEM + Administrators + whichever account ran the install) that does **not** include the generic service group, so the virtual account was flatly denied on that one channel while Security/System worked fine.
+
+**Fix:** Switched the service to run as Local System, which bypasses the channel ACL restriction entirely:
+```powershell
+sc.exe config SplunkForwarder obj= "LocalSystem"
+Restart-Service SplunkForwarder
+```
+Confirmed working via:
+```spl
+index="windows-events" source="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+```
+(Least-privilege alternative, not used here: keep the virtual service account and explicitly grant it access to just the Sysmon channel via `wevtutil sl` with the account's resolved SID — more correct for a hardened environment, more fragile to get right by hand. Local System was the pragmatic call for this homelab.)
+
+**Status:** Resolved.
 
 *(Log new issues below this line as they come up, same Symptom/Cause/Fix format.)*
 
