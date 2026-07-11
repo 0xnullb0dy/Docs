@@ -20,14 +20,15 @@
 | Hostname (DNS) | `bigmox.home.arpa` | `minimox.home.arpa` |
 | Web UI | `https://bigmox.home.arpa:8006` | `https://minimox.home.arpa:8006` |
 | DHCP reservation | Yes (MAC-based) | Yes (MAC-based) |
-| CPU(s) | 12 x AMD Ryzen 5 2600 Six-Core Processor (1 Socket) | 12 x AMD Ryzen 5 6600H with Radeon Graphics (1 Socket) |
+| CPU(s) | 12 x AMD Ryzen 5 2600 Six-Core Processor (1 Socket) — SVM (AMD-V) confirmed enabled in BIOS as of July 10, 2026 (see SOC Build Plan Current-Stack Issue 4; was found disabled, likely from a defaults reset during RAM troubleshooting) | 12 x AMD Ryzen 5 6600H with Radeon Graphics (1 Socket) |
+| RAM (physical) | Sticks physically replaced July 10, 2026 after `memtest86` confirmed 15,391+ errors on the originals — see SOC Build Plan Current-Stack Issue 4 | Not flagged as an issue |
 | Total RAM | 31.29 GiB | 15.34 GiB |
 | Total `/` disk | 36.81 GiB | 93.93 GiB |
 | Swap | 8.00 GiB | 8.00 GiB |
 | Kernel | Linux 7.0.2-6-pve (2026-05-20T08:55Z) | Linux 6.14.8-2-pve (2025-07-22T10:04Z) |
 | Boot Mode | EFI | EFI |
 | Proxmox Manager Version | pve-manager/9.2.2/b9984c6d90a4bd80 | pve-manager/9.0.3/025864202ebb6109 |
-| Storage backend note | ZFS on a spare 1 TB drive (adopted for VM storage instead of LVM-Thin, after LVM-Thin was suspected in earlier corruption issues) | Not specified in source docs |
+| Storage backend note | ZFS pool `Storage` on a 2 TB `ST2000DX002` drive (replaced the original 1 TB drive July 10, 2026 after a damaged SATA connector pin — see SOC Build Plan Current-Stack Issue 4). Single-disk vdev; mirroring evaluated and ruled out as not possible on this hardware, scheduled scrub is the mitigation instead. | Not specified in source docs |
 | Hosts (VMs) | Splunk VM *(repurposed from Wazuh)*, Ansible+Semaphore VM, Splunk SOAR VM *(planned)*, Keycloak VM *(planned)* | OpenEDR VM, OpenVAS VM, FreeIPA VM *(planned)*, IAM demo-apps VM *(planned)* |
 
 ### Live Utilization Snapshot — July 5, 2026
@@ -87,7 +88,7 @@ All VMs currently documented, across both source files:
 
 | VM / Hostname | Host | Purpose | OS | vCPU | RAM | Disk | Storage Backend | Network / VLAN | IP |
 |---|---|---|---|---|---|---|---|---|---|
-| `splunk.home.arpa` *(repurposed from `wazuh.home.arpa`)* | Bigmox | Splunk Enterprise — primary SIEM. Wazuh fully removed; this is the same VM, repurposed, not a rebuild | Ubuntu 24.04 LTS | 8 vCPU *(current — target is 4 vCPU, see note)* | 16 GB *(current — target is 8 GB)* | 50 GB *(current — target is 100 GB, resize planned)* | ZFS | `vmbr0`, VLAN 40 | 10.40.40.12 |
+| `splunk.home.arpa` *(repurposed from `wazuh.home.arpa`, then fully rebuilt July 10, 2026 after disk/RAM/BIOS issues — see SOC Build Plan Current-Stack Issue 4)* | Bigmox | Splunk Enterprise — primary SIEM | Ubuntu 24.04 LTS | 8 vCPU *(current — target is 4 vCPU, see note)* | 16 GB *(current — target is 8 GB)* | 250 GB | ZFS *(single-disk vdev on new `Storage` pool; mirroring ruled out as not possible on this hardware — see SOC Build Plan Current-Stack Issue 4)* | `vmbr0`, VLAN 40 | 10.40.40.12 |
 | `openedr.home.arpa` | Minimox | OpenEDR backend (Docker: OrientDB + SFTP receiver + web frontend, jymcheong fork) | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.13 |
 | `scanner.home.arpa` | Minimox | OpenVAS / Greenbone Community Edition — agentless vulnerability scanning across all VLANs | Ubuntu 22.04 LTS | 4 vCPU | 8 GB | 100 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.14 |
 | `ansible.home.arpa` | Bigmox | Ansible + Semaphore — config management / automation execution layer (future SOAR target) | Ubuntu 24.04 LTS | 2 vCPU | 2 GB | 20 GB | Not specified | `vmbr0`, VLAN 40 | 10.40.40.15 |
@@ -129,13 +130,17 @@ All VMs currently documented, across both source files:
 > the entire monitoring/scanning capability at once.
 
 > [!note] Splunk VM resource sizing — right-sizing pending
-> The VM's current 8 vCPU / 16 GB / 50 GB was sized for Wazuh's indexer + dashboard
+> The VM's original 8 vCPU / 16 GB / 50 GB was sized for Wazuh's indexer + dashboard
 > running alongside Splunk — a real bottleneck was hit during that install (the
 > dashboard's one-time bundling step alone could exhaust 12 GB of RAM). Running
-> Splunk alone is lighter; the new target spec is 4 vCPU / 8 GB, with disk actually
-> increased to 100 GB for Splunk's own index storage needs. No urgency on the
-> CPU/RAM trim — the extra headroom sitting idle doesn't hurt anything — but the
-> disk resize is worth doing intentionally.
+> Splunk alone is lighter; the target CPU/RAM spec is still 4 vCPU / 8 GB — no
+> urgency on that trim, the extra headroom sitting idle doesn't hurt anything.
+> Disk was provisioned at 250 GB during the July 10, 2026 rebuild (see SOC Build
+> Plan Current-Stack Issue 4 for why a rebuild was needed) — larger than the originally planned
+> 100 GB, to give real headroom for index growth plus safety margin above
+> Splunk's minFreeSpace floor. indexes.conf and server.conf were sized against
+> this 250 GB figure: ~220 GB available for indexing after OS/app/minFreeSpace
+> reservations, with a shared volume cap of 190 GB across all custom indexes.
 
 ---
 
@@ -162,4 +167,4 @@ sizing decisions.
 
 ---
 
-*Compiled July 2026 as a standing reference. Last updated: July 6, 2026 (Wazuh → Splunk pivot). Update whenever a new VM is created or specs change on Bigmox/Minimox.*
+*Compiled July 2026 as a standing reference. Last updated: July 10, 2026 (Bigmox hardware fixes — new storage pool, RAM replaced, SVM enabled; see SOC Build Plan Current-Stack Issue 4). Update whenever a new VM is created or specs change on Bigmox/Minimox.*

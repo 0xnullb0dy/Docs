@@ -318,7 +318,7 @@ sudo /opt/splunk/bin/splunk enable boot-start
 
 - [x] Splunk Web → Settings → Forwarding and Receiving → Receive Data → Add New
       → port `9997` → Save
-- [ ] Create indexes (Settings → Indexes → New Index):
+- [x] Create indexes (Settings → Indexes → New Index):
       - `windows-events` (Sysmon + Windows Security/System/Application logs)
       - `linux-audit` (Auditd from Pi, Bigmox host, Minimox host)
       - `openedr-events` (bridged from OpenEDR via HEC — Phase 8)
@@ -996,6 +996,29 @@ host=fedora earliest=-1h
 
 **Status:** Both fixes applied. Splunk has been stable since the CPU type change — **not yet confirmed long-term**, monitoring continues.
 
+### Current-Stack Issue 4 — Bigmox host-level RAM failure cascading through disk, package installs, and VM startup (full rebuild saga, July 10, 2026)
+**Symptom (chain, in order):**
+1. `zpool status -v` on the original `wazuh-storage` pool (single `ata-WDC_WD10EZEX-00BN5A0` drive) showed `DEGRADED`, 38 CKSUM errors, a scrub that found 20 errors it couldn't repair (no redundancy on a single-disk pool), and a permanent error in `wazuh-storage/vm-100-disk-0` — the Splunk VM's own disk.
+2. Splunk crashed with a SIGSEGV inside `STMgr::HandleWritable::sync` (`No memory mapped at address`, `Last errno: 2` / ENOENT) on an `IndexerTPoolWorker` thread — consistent with a memory-mapped bucket file going invalid mid-write.
+3. After removing the drive and building a fresh 2 TB `Storage` pool (`ata-ST2000DX002-2DV164`, confirmed `ONLINE`, 0 errors), corruption kept happening on the new, healthy pool: `dpkg -i` on the Splunk `.deb` failed (`lzma error: compressed data is corrupt`) despite a matching file hash, and moments later a completely unrelated, freshly-fetched `binutils-x86-64-linux-gnu` package from Ubuntu's own mirrors failed the same way (`invalid tar header checksum`) — even though `apt` had already hash-verified it on download. Disk space was never the issue (86 GB free on `/`, 1.7 GB free on `/boot`).
+4. After a RAM swap (see Cause below) and rebuild attempt, VM start failed with `TASK ERROR: KVM virtualisation configured, but not available.` `modprobe kvm_amd` returned `Operation not supported`, and `dmesg` showed `kvm_amd: SVM not supported by CPU 8` — one specific core reporting inconsistent CPUID versus the rest.
+
+**Cause:**
+- **Root cause: failing RAM**, confirmed via `memtest86` — 15,391+ errors on the very first pass, on a box with no XMP/DOCP overclock active (confirmed off, memory running at Auto/JEDEC speed) — ruling out an unstable-overclock explanation and pointing to genuine hardware failure. This explains the package-install corruption on the *new, healthy* pool: ZFS can only checksum-verify data it's handed. If RAM flips a bit while data is being generated/decompressed (before it reaches the block device), ZFS checksums the already-corrupt bytes and `zpool status` stays clean — while the file itself is logically broken. That's a different failure mode from a **read**-time flip during scrub, which *does* show up as CKSUM errors — same underlying bad RAM, two different symptoms depending on which side of the checksum the flip landed on.
+- **Compounding, independently-confirmed issue:** the original `wazuh-storage` drive also had a physically damaged pin on its own SATA connector (not the cable or the motherboard port) — a second, genuinely separate hardware fault contributing real corruption/DEGRADED-pool symptoms on top of the RAM issue. SMART data on that drive was otherwise clean (0 reallocated/pending/uncorrectable sectors, 1 lifetime CRC error, overall PASSED) — consistent with a connector/interface-level fault rather than failing media.
+- **Third, independent issue:** SVM (AMD-V) was disabled in BIOS — most likely from a defaults reset made while chasing the XMP/DOCP and RAM troubleshooting. This alone blocks all KVM-accelerated VMs on the host regardless of RAM/disk health, and explains the CPU-8-specific inconsistency (some AMD boards report CPUID inconsistently across cores while SVM is disabled).
+- **Mirroring the pool was evaluated and ruled out** — not possible on this hardware. Scheduled scrubs are the standing mitigation instead (see task list / New Roadmap Items).
+
+**Fix:**
+1. Removed the damaged-connector drive entirely; built a fresh single-vdev `Storage` pool on a new 2 TB `ST2000DX002` drive (confirmed `ONLINE`, 0 errors both before and after the RAM fix).
+2. Ran `memtest86`, confirmed real hardware failure, physically swapped the RAM sticks.
+3. Discovered SVM disabled in BIOS, re-enabled it, and did a **full cold boot** (power off, wait, power back on) rather than a warm reboot — AMD platforms don't reliably re-apply per-core SVM MSR state on a warm reboot alone. Confirmed via `modprobe kvm_amd` succeeding and `/dev/kvm` present.
+4. Splunk VM now boots; web UI confirmed reachable.
+
+**Cross-reference:** This likely retroactively explains the `_metrics` index STMgr error (`unexpected rc=-105 from st_txn_put`) noted in Current-Stack Issue 3 above, which that entry explicitly flagged as "never proven as root cause; likely just another downstream symptom" — bad RAM is now a strong candidate for that symptom too. This does **not** change Issue 3's own root cause or fix (missing AVX exposure from the `kvm64` CPU type, fixed by switching to `host`) — that was independently confirmed via direct `/proc/cpuinfo` verification and remains valid; it's a separate, compounding problem on the same box, not an alternate explanation for it.
+
+**Status:** RAM swapped, SVM enabled, Splunk web UI confirmed loading. Not yet confirmed long-term stable — hold off on declaring the rebuild done until Splunk, then Ansible/Semaphore and SOAR, have run clean for a few days. A full multi-pass `memtest86` run on the replacement RAM is still worth doing for formal confirmation (a short run without errors is a good sign, not a guarantee).
+
 *(Log new issues below this line as they come up, same Symptom/Cause/Fix format.)*
 
 ---
@@ -1052,6 +1075,6 @@ host=fedora earliest=-1h
 
 ---
 
-*Document started: July 2026 | Last updated: July 6, 2026 — full rewrite for the
-Wazuh → Splunk-primary stack pivot*
+*Document started: July 2026 | Last updated: July 10, 2026 — added Current-Stack
+Issue 4 (RAM/disk/SVM troubleshooting saga)*
 *Cross-references: Homelab-Network-Documentation.md, Homelab-Server-VM-Specs.md*
